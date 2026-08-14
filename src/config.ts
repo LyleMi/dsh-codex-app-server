@@ -19,6 +19,7 @@ export interface Config {
   disposeGraceMs?: number
   stderrMaxBytes?: number
   unknownNotificationPolicy?: UnknownNotificationPolicy
+  bindingRoot?: string
 }
 
 /** Fully validated configuration used by all runtime components. */
@@ -36,6 +37,7 @@ export interface ResolvedConfig {
   disposeGraceMs: number
   stderrMaxBytes: number
   unknownNotificationPolicy: UnknownNotificationPolicy
+  bindingRoot?: string
 }
 
 const ALLOWED_ARGS = new Set(['--strict-config'])
@@ -75,5 +77,6 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     disposeGraceMs: positiveInteger('disposeGraceMs', config.disposeGraceMs, 5_000),
     stderrMaxBytes: positiveInteger('stderrMaxBytes', config.stderrMaxBytes, 64 * 1024),
     unknownNotificationPolicy: config.unknownNotificationPolicy ?? 'ignore',
+    ...(config.bindingRoot === undefined ? {} : { bindingRoot: config.bindingRoot }),
   }
 }

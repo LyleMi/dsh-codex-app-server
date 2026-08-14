@@ -23,6 +23,7 @@ export class AppServerClient {
   private readonly transport: AppServerTransport
   private activeTurn: ActiveTurn | undefined
   private binding: ThreadBinding | undefined
+  private interruptPending = false
 
   constructor(
     private readonly process: CodexProcess,
@@ -30,7 +31,7 @@ export class AppServerClient {
     private readonly handleServerRequest: ServerRequestHandler,
   ) {
     this.transport = new AppServerTransport(process.child.stdout, process.child.stdin, config.requestIdleTimeoutMs, {
-      notification: (message) => routeNotification(this.activeTurn, this.config, message.method, message.params),
+      notification: (message) => this.receiveNotification(message.method, message.params),
       request: (request) => this.onServerRequest(request),
       protocolError: () => {},
     })
@@ -120,6 +121,7 @@ export class AppServerClient {
       completion,
     }
     this.activeTurn = active
+    this.interruptPending = false
     try {
       const started = parseTurnStartResult(
         await this.transport.request('turn/start', {
@@ -135,6 +137,7 @@ export class AppServerClient {
       active.turnId = started.id
       return await completion.promise
     } finally {
+      this.interruptPending = false
       if (this.activeTurn === active) this.activeTurn = undefined
     }
   }
@@ -142,7 +145,14 @@ export class AppServerClient {
   /** Interrupt the active correlated Codex turn. */
   async interrupt(): Promise<void> {
     const active = this.activeTurn
-    if (active?.turnId === undefined) return
+    if (active === undefined) return
+    this.interruptPending = true
+    if (active.turnId === undefined) return
+    await this.sendInterrupt(active)
+  }
+
+  private async sendInterrupt(active: ActiveTurn): Promise<void> {
+    if (active.turnId === undefined) return
     await this.transport.request(
       'turn/interrupt',
       { threadId: active.threadId, turnId: active.turnId },
@@ -150,9 +160,29 @@ export class AppServerClient {
     )
   }
 
+  /** Add model-visible input to the active turn at App Server's native steer boundary. */
+  async steer(input: string): Promise<void> {
+    const active = this.activeTurn
+    if (active?.turnId === undefined) throw new CodexAppServerError('PROTOCOL_INVALID', 'no active turn to steer')
+    await this.transport.request('turn/steer', {
+      threadId: active.threadId,
+      expectedTurnId: active.turnId,
+      input: [{ type: 'text', text: input, text_elements: [] }],
+    })
+  }
+
   /** Reject protocol work before the process owner terminates the child. */
   close(): void {
     this.transport.close()
+  }
+
+  private receiveNotification(method: string, params: unknown): void {
+    const active = this.activeTurn
+    routeNotification(active, this.config, method, params)
+    if (this.interruptPending && active?.turnId !== undefined) {
+      this.interruptPending = false
+      void this.sendInterrupt(active).catch((error) => active.completion.reject(error))
+    }
   }
 
   private assertWorkspace(expected: string, actual: string): void {
