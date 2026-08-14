@@ -39,6 +39,7 @@ export class CodexAgentFactory implements AgentFactory {
   private accepting = true
   private readonly shutdown = new AbortController()
   private readonly live = new Set<(ownerTriggered?: boolean) => Promise<void>>()
+  private readonly claimedIds = new Set<SessionId>()
   private readonly bindings: ThreadBindingStore
 
   constructor(
@@ -51,40 +52,53 @@ export class CodexAgentFactory implements AgentFactory {
 
   async createAgent(ownerCtx: Context, options: CreateAgentOptions): Promise<AgentHandle> {
     this.assertActive(ownerCtx)
-    const preparation = SessionPreparation.create(
-      this.ctx.sessions.prepare(options.sessionId, {
-        ...(options.seed === undefined ? {} : { seed: options.seed }),
-        ...(options.meta === undefined ? {} : { meta: options.meta }),
-      }),
-    )
-    return this.setupAndPublish({
-      ownerCtx,
-      preparation,
-      id: options.sessionId,
-      options: options.agentOptions ?? {},
-      ...(options.setup === undefined ? {} : { setup: options.setup }),
-      ...(options.signal === undefined ? {} : { callerSignal: options.signal }),
-      source: 'startup',
-    })
+    this.claim(options.sessionId)
+    try {
+      const preparation = SessionPreparation.create(
+        this.ctx.sessions.prepare(options.sessionId, {
+          ...(options.seed === undefined ? {} : { seed: options.seed }),
+          ...(options.meta === undefined ? {} : { meta: options.meta }),
+        }),
+      )
+      return await this.setupAndPublish({
+        ownerCtx,
+        preparation,
+        id: options.sessionId,
+        options: options.agentOptions ?? {},
+        ...(options.setup === undefined ? {} : { setup: options.setup }),
+        ...(options.signal === undefined ? {} : { callerSignal: options.signal }),
+        source: 'startup',
+      })
+    } catch (error: unknown) {
+      this.claimedIds.delete(options.sessionId)
+      throw error
+    }
   }
 
   async resume(ownerCtx: Context, options: ResumeAgentOptions): Promise<AgentHandle> {
     this.assertActive(ownerCtx)
+    this.claim(options.resumeSessionId)
     const persistence: SessionPersistence | undefined = this.ctx.get('sessionPersistence')
     if (persistence === undefined) {
+      this.claimedIds.delete(options.resumeSessionId)
       throw new Error('cannot resume: session persistence is not configured')
     }
-    const signal = AbortSignal.any([this.shutdown.signal, ...(options.signal === undefined ? [] : [options.signal])])
-    const preparation = await persistence.prepare(options.resumeSessionId, signal)
-    return this.setupAndPublish({
-      ownerCtx,
-      preparation,
-      id: options.resumeSessionId,
-      options: options.agentOptions ?? {},
-      ...(options.setup === undefined ? {} : { setup: options.setup }),
-      ...(options.signal === undefined ? {} : { callerSignal: options.signal }),
-      source: 'resume',
-    })
+    try {
+      const signal = AbortSignal.any([this.shutdown.signal, ...(options.signal === undefined ? [] : [options.signal])])
+      const preparation = await persistence.prepare(options.resumeSessionId, signal)
+      return await this.setupAndPublish({
+        ownerCtx,
+        preparation,
+        id: options.resumeSessionId,
+        options: options.agentOptions ?? {},
+        ...(options.setup === undefined ? {} : { setup: options.setup }),
+        ...(options.signal === undefined ? {} : { callerSignal: options.signal }),
+        source: 'resume',
+      })
+    } catch (error: unknown) {
+      this.claimedIds.delete(options.resumeSessionId)
+      throw error
+    }
   }
 
   /** Stop admission, cancel creation, and drain every process owned by this factory. */
@@ -117,8 +131,9 @@ export class CodexAgentFactory implements AgentFactory {
     ])
     const commit = await raceAbort(setup?.(lifecycle.agent.ctx), signal)
     commit?.commit()
-    const wroteBinding = await this.connectThread(lifecycle.agent, preparation, id, source)
+    const wroteBinding = await raceAbort(this.connectThread(lifecycle.agent, preparation, id, source), signal)
     try {
+      signal.throwIfAborted()
       return lifecycle.publish(source)
     } catch (error: unknown) {
       if (wroteBinding) await this.bindings.remove(id)
@@ -185,6 +200,7 @@ export class CodexAgentFactory implements AgentFactory {
             detachSession?.()
           } finally {
             this.live.delete(dispose)
+            this.claimedIds.delete(id)
             if (!ownerTriggered) await unfollowOwner?.()
           }
         }
@@ -228,6 +244,11 @@ export class CodexAgentFactory implements AgentFactory {
   private assertActive(ownerCtx: Context): void {
     ownerCtx.fiber.assertActive()
     if (!this.accepting || this.shutdown.signal.aborted) throw new Error('Codex AgentFactory is not active')
+  }
+
+  private claim(id: SessionId): void {
+    if (this.claimedIds.has(id)) throw new Error(`agent ${id} is already being created or is active`)
+    this.claimedIds.add(id)
   }
 }
 

@@ -1,5 +1,4 @@
 import type { Readable, Writable } from 'node:stream'
-import { createInterface } from 'node:readline'
 import { CodexAppServerError } from '../errors.js'
 import type { JsonRpcId, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse } from './protocol.js'
 import { parseJsonRpc } from './protocol.js'
@@ -21,25 +20,18 @@ export class AppServerTransport {
   private nextId = 1
   private pending = new Map<JsonRpcId, PendingRequest>()
   private closed = false
-  private readonly lines
+  private inputBuffer = ''
 
   constructor(
     input: Readable,
     private readonly output: Writable,
     private readonly timeoutMs: number,
     private readonly handlers: TransportHandlers,
+    private readonly maxFrameBytes = 8 * 1024 * 1024,
   ) {
-    this.lines = createInterface({ input, crlfDelay: Infinity })
-    this.lines.on('line', (line) => {
-      if (line.length === 0) return
-      try {
-        this.receive(parseJsonRpc(line))
-      } catch (error: unknown) {
-        handlers.protocolError(error)
-        this.close(error)
-      }
-    })
-    this.lines.on('close', () => this.close(new CodexAppServerError('PROTOCOL_CLOSED', 'App Server stdout closed')))
+    input.setEncoding('utf8')
+    input.on('data', (chunk: string) => this.receiveChunk(chunk))
+    input.on('end', () => this.close(new CodexAppServerError('PROTOCOL_CLOSED', 'App Server stdout closed')))
     input.on('error', (error) => this.close(error))
     output.on('error', (error) => this.close(error))
   }
@@ -84,7 +76,6 @@ export class AppServerTransport {
   close(reason: unknown = new CodexAppServerError('PROTOCOL_CLOSED', 'App Server transport closed')): void {
     if (this.closed) return
     this.closed = true
-    this.lines.close()
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer)
       pending.reject(reason)
@@ -94,6 +85,37 @@ export class AppServerTransport {
 
   private write(message: object): void {
     this.output.write(`${JSON.stringify(message)}\n`)
+  }
+
+  private receiveChunk(chunk: string): void {
+    if (this.closed) return
+    this.inputBuffer += chunk
+    let boundary: number
+    while ((boundary = this.inputBuffer.indexOf('\n')) >= 0) {
+      const line = this.inputBuffer.slice(0, boundary).replace(/\r$/, '')
+      this.inputBuffer = this.inputBuffer.slice(boundary + 1)
+      if (line.length > 0 && !this.receiveLine(line)) return
+    }
+    if (Buffer.byteLength(this.inputBuffer) > this.maxFrameBytes) this.rejectOversizedFrame()
+  }
+
+  private receiveLine(line: string): boolean {
+    try {
+      if (Buffer.byteLength(line) > this.maxFrameBytes) return this.rejectOversizedFrame()
+      this.receive(parseJsonRpc(line))
+      return true
+    } catch (error: unknown) {
+      this.handlers.protocolError(error)
+      this.close(error)
+      return false
+    }
+  }
+
+  private rejectOversizedFrame(): false {
+    const error = new CodexAppServerError('PROTOCOL_INVALID', `App Server frame exceeds ${this.maxFrameBytes} bytes`)
+    this.handlers.protocolError(error)
+    this.close(error)
+    return false
   }
 
   private receive(message: JsonRpcMessage): void {

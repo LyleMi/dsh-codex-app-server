@@ -3,20 +3,20 @@ import { CodexAppServerError } from '../errors.js'
 export type JsonRpcId = number | string
 
 export interface JsonRpcRequest {
-  jsonrpc: '2.0'
+  jsonrpc?: '2.0'
   id: JsonRpcId
   method: string
   params?: unknown
 }
 
 export interface JsonRpcNotification {
-  jsonrpc: '2.0'
+  jsonrpc?: '2.0'
   method: string
   params?: unknown
 }
 
 export interface JsonRpcResponse {
-  jsonrpc: '2.0'
+  jsonrpc?: '2.0'
   id: JsonRpcId
   result?: unknown
   error?: { code: number; message: string; data?: unknown }
@@ -70,22 +70,29 @@ function stringField(value: Record<string, unknown>, key: string, context: strin
   return field
 }
 
-/** Parse and minimally validate a JSON-RPC 2.0 frame without rejecting extensions. */
-export function parseJsonRpc(line: string): JsonRpcMessage {
-  let parsed: unknown
+function decodeJson(line: string): unknown {
   try {
-    parsed = JSON.parse(line) as unknown
+    return JSON.parse(line) as unknown
   } catch (error: unknown) {
     throw new CodexAppServerError('PROTOCOL_INVALID', 'App Server emitted invalid JSON', { cause: error })
   }
-  const value = record(parsed, 'JSON-RPC frame')
-  if (value['jsonrpc'] !== '2.0') {
-    throw new CodexAppServerError('PROTOCOL_INVALID', 'App Server frame lacks jsonrpc "2.0"')
+}
+
+function validateEnvelope(value: Record<string, unknown>): JsonRpcId | undefined {
+  if (value['jsonrpc'] !== undefined && value['jsonrpc'] !== '2.0') {
+    throw new CodexAppServerError('PROTOCOL_INVALID', 'App Server frame has an unsupported jsonrpc version')
   }
   const id = value['id']
   if (id !== undefined && typeof id !== 'string' && typeof id !== 'number') {
     throw new CodexAppServerError('PROTOCOL_INVALID', 'JSON-RPC id must be a string or number')
   }
+  return id
+}
+
+/** Parse and minimally validate a JSON-RPC 2.0 frame without rejecting extensions. */
+export function parseJsonRpc(line: string): JsonRpcMessage {
+  const value = record(decodeJson(line), 'JSON-RPC frame')
+  const id = validateEnvelope(value)
   if (value['method'] !== undefined) {
     stringField(value, 'method', 'JSON-RPC frame')
     return value as unknown as JsonRpcRequest | JsonRpcNotification

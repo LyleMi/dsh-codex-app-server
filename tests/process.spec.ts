@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { resolveConfig } from '../src/config.js'
-import { buildSpawnSpec } from '../src/process.js'
+import { buildSpawnSpec, CodexProcess } from '../src/process.js'
 
 describe('process argv', () => {
   it('uses direct POSIX argv without a shell', () => {
@@ -20,5 +20,14 @@ describe('process argv', () => {
   it('never places prompt text in argv', () => {
     const spec = buildSpawnSpec(resolveConfig(), '/workspace', 'linux')
     expect(JSON.stringify(spec)).not.toContain('user prompt')
+  })
+
+  it.runIf(process.platform !== 'win32')('settles and disposes after an asynchronous spawn failure', async () => {
+    const child = new CodexProcess(resolveConfig({ command: '/definitely/not/a/codex-binary' }), process.cwd())
+    const result = await child.exited
+    expect(result).toMatchObject({ code: null, signal: null })
+    expect(result.error).toBeInstanceOf(Error)
+    await expect(child.dispose()).resolves.toBeUndefined()
+    expect(child.diagnostic).toContain('ENOENT')
   })
 })

@@ -18,6 +18,11 @@ describe('protocol validation', () => {
     expect(turn.items[0]).toMatchObject({ type: 'futureItem', future: true })
   })
 
+  it('accepts Codex frames that omit the optional JSON-RPC version marker', () => {
+    expect(parseJsonRpc('{"id":1,"result":{"ok":true}}')).toEqual({ id: 1, result: { ok: true } })
+    expect(() => parseJsonRpc('{"jsonrpc":"1.0","id":1,"result":{}}')).toThrow('unsupported jsonrpc version')
+  })
+
   it('validates durable thread binding fields', () => {
     expect(
       parseThreadResult({

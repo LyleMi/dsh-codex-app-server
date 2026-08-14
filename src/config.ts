@@ -18,6 +18,7 @@ export interface Config {
   interruptGraceMs?: number
   disposeGraceMs?: number
   stderrMaxBytes?: number
+  protocolMaxBytes?: number
   unknownNotificationPolicy?: UnknownNotificationPolicy
   bindingRoot?: string
 }
@@ -36,6 +37,7 @@ export interface ResolvedConfig {
   interruptGraceMs: number
   disposeGraceMs: number
   stderrMaxBytes: number
+  protocolMaxBytes: number
   unknownNotificationPolicy: UnknownNotificationPolicy
   bindingRoot?: string
 }
@@ -76,6 +78,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     interruptGraceMs: positiveInteger('interruptGraceMs', config.interruptGraceMs, 3_000),
     disposeGraceMs: positiveInteger('disposeGraceMs', config.disposeGraceMs, 5_000),
     stderrMaxBytes: positiveInteger('stderrMaxBytes', config.stderrMaxBytes, 64 * 1024),
+    protocolMaxBytes: positiveInteger('protocolMaxBytes', config.protocolMaxBytes, 8 * 1024 * 1024),
     unknownNotificationPolicy: config.unknownNotificationPolicy ?? 'ignore',
     ...(config.bindingRoot === undefined ? {} : { bindingRoot: config.bindingRoot }),
   }

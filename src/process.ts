@@ -91,6 +91,7 @@ export class CodexProcess {
   readonly exited: Promise<{
     code: number | null
     signal: NodeJS.Signals | null
+    error?: Error
   }>
   private stderr = ''
   private disposing = false
@@ -114,6 +115,10 @@ export class CodexProcess {
     })
     this.exited = new Promise((resolve) => {
       this.child.once('exit', (code, signal) => resolve({ code, signal }))
+      this.child.once('error', (error) => {
+        this.stderr = redactDiagnostic(`${this.stderr}${error.message}`, config.stderrMaxBytes)
+        resolve({ code: null, signal: null, error })
+      })
     })
   }
 
@@ -145,8 +150,16 @@ export class CodexProcess {
   private terminate(signal: NodeJS.Signals): void {
     const pid = this.child.pid
     if (pid === undefined) return
+    if (process.platform === 'win32') {
+      const taskkill = spawn('taskkill.exe', ['/pid', String(pid), '/t', ...(signal === 'SIGKILL' ? ['/f'] : [])], {
+        stdio: 'ignore',
+        windowsHide: true,
+      })
+      taskkill.on('error', () => {})
+      return
+    }
     try {
-      process.kill(process.platform === 'win32' ? pid : -pid, signal)
+      process.kill(-pid, signal)
     } catch (error: unknown) {
       const code = (error as NodeJS.ErrnoException).code
       if (code !== 'ESRCH') throw error

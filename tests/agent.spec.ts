@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, SessionPreparation } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CodexConnectionLauncher } from '../src/agent.js'
 import { resolveConfig } from '../src/config.js'
@@ -150,6 +151,109 @@ describe('Codex AgentFactory and Agent', () => {
     expect(launch).not.toHaveBeenCalled()
     expect(published).not.toHaveBeenCalled()
     expect(ctx.sessions.get(SessionId('setup-failure'))).toBeUndefined()
+    await factory.dispose()
+  })
+
+  it('rejects a concurrent duplicate identity before launching a second process', async () => {
+    const { ctx, bindingRoot } = await harness()
+    const launch = vi.fn(mockLauncher())
+    const factory = await installFactory(ctx, bindingRoot, launch)
+    const setup = Promise.withResolvers<void>()
+    const first = ctx.agents.create({
+      sessionId: SessionId('duplicate'),
+      setup: () => setup.promise,
+    })
+    await expect(ctx.agents.create({ sessionId: SessionId('duplicate') })).rejects.toThrow(/already being created/)
+    setup.resolve()
+    const handle = await first
+    expect(launch).toHaveBeenCalledOnce()
+    await handle.dispose()
+    await factory.dispose()
+  })
+
+  it('aborts an unpublished setup without launching or publishing', async () => {
+    const { ctx, bindingRoot } = await harness()
+    const launch = vi.fn(mockLauncher())
+    const factory = await installFactory(ctx, bindingRoot, launch)
+    const controller = new AbortController()
+    const creating = ctx.agents.create({
+      sessionId: SessionId('aborted-setup'),
+      signal: controller.signal,
+      setup: () => new Promise<void>(() => {}),
+    })
+    controller.abort(new Error('caller stopped'))
+    await expect(creating).rejects.toThrow('caller stopped')
+    expect(launch).not.toHaveBeenCalled()
+    expect(ctx.sessions.get(SessionId('aborted-setup'))).toBeUndefined()
+    await factory.dispose()
+  })
+
+  it('resumes only the exact durable Codex thread and workspace', async () => {
+    const { ctx, bindingRoot } = await harness()
+    const workspace = await mkdtemp(join(tmpdir(), 'dsh-codex-resume-'))
+    temporaryRoots.push(workspace)
+    const resumeThread = vi.fn((threadId: string) =>
+      Promise.resolve({
+        thread: { id: threadId, ephemeral: false, cwd: workspace, cliVersion: '0.147.0' },
+        model: 'gpt-5',
+        modelProvider: 'openai',
+        cwd: workspace,
+      }),
+    )
+    const base = mockLauncher()
+    const launcher: CodexConnectionLauncher = (config, cwd, handler) => {
+      const connection = base(config, cwd, handler)
+      connection.client.resumeThread = resumeThread
+      return connection
+    }
+    const factory = await installFactory(ctx, bindingRoot, launcher)
+    const id = SessionId('resumable')
+    const first = await ctx.agents.create({ sessionId: id, meta: { cwd: workspace } })
+    const snapshot: { meta: SessionHeader; events: SessionEvent[] } = {
+      meta: structuredClone(first.agent.session.header),
+      events: structuredClone(first.agent.session.events) as SessionEvent[],
+    }
+    await first.dispose()
+    ctx.provide('sessionPersistence', {
+      prepare: () =>
+        Promise.resolve(
+          SessionPreparation.create(
+            ctx.sessions.prepare(id, { seed: snapshot.events, meta: snapshot.meta, seedSource: 'persistence' }),
+          ),
+        ),
+    } as never)
+    const resumed = await ctx.agents.resume({ resumeSessionId: id })
+    expect(resumeThread).toHaveBeenCalledWith('codex-thread-1', workspace)
+    await resumed.dispose()
+    await factory.dispose()
+  })
+
+  it('sends injected context in the next turn without waking on inject alone', async () => {
+    const { ctx, bindingRoot } = await harness()
+    const prompts: string[] = []
+    const base = mockLauncher()
+    const launcher: CodexConnectionLauncher = (config, cwd, handler) => {
+      const connection = base(config, cwd, handler)
+      const run = connection.client.startTurn.bind(connection.client)
+      connection.client.startTurn = (input, callbacks) => {
+        prompts.push(input)
+        return run(input, callbacks)
+      }
+      return connection
+    }
+    const factory = await installFactory(ctx, bindingRoot, launcher)
+    const handle = await ctx.agents.create({ sessionId: SessionId('injected-context') })
+    handle.agent.inject(
+      createUserMessage({ content: [{ type: 'text', text: 'quiet context' }], source: { kind: 'user' } }),
+    )
+    await handle.agent.whenIdle()
+    expect(prompts).toEqual([])
+    handle.agent.followup(
+      createUserMessage({ content: [{ type: 'text', text: 'wake now' }], source: { kind: 'user' } }),
+    )
+    await handle.agent.whenIdle()
+    expect(prompts).toEqual(['quiet context\n\nwake now'])
+    await handle.dispose()
     await factory.dispose()
   })
 })

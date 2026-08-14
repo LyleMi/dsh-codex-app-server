@@ -38,6 +38,7 @@ export class CodexAppServerPlugin extends Service {
     interruptGraceMs: z.number().step(1).min(1).default(3_000),
     disposeGraceMs: z.number().step(1).min(1).default(5_000),
     stderrMaxBytes: z.number().step(1).min(1).default(65_536),
+    protocolMaxBytes: z.number().step(1).min(1).default(8_388_608),
     unknownNotificationPolicy: z.union(['ignore', 'fail-turn'] as const).default('ignore'),
     bindingRoot: z.string(),
   }) as z<Config>

@@ -30,11 +30,17 @@ export class AppServerClient {
     private readonly config: ResolvedConfig,
     private readonly handleServerRequest: ServerRequestHandler,
   ) {
-    this.transport = new AppServerTransport(process.child.stdout, process.child.stdin, config.requestIdleTimeoutMs, {
-      notification: (message) => this.receiveNotification(message.method, message.params),
-      request: (request) => this.onServerRequest(request),
-      protocolError: () => {},
-    })
+    this.transport = new AppServerTransport(
+      process.child.stdout,
+      process.child.stdin,
+      config.requestIdleTimeoutMs,
+      {
+        notification: (message) => this.receiveNotification(message.method, message.params),
+        request: (request) => this.onServerRequest(request),
+        protocolError: () => {},
+      },
+      config.protocolMaxBytes,
+    )
     void process.exited.then(({ code, signal }) => {
       const error = new CodexAppServerError(
         'PROCESS_EXITED',
@@ -78,7 +84,6 @@ export class AppServerClient {
         approvalPolicy: this.config.approvalPolicy,
         sandbox: this.config.sandboxMode,
         ephemeral: false,
-        historyMode: 'full',
       }),
     )
     this.assertWorkspace(cwd, result.cwd)

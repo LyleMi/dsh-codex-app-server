@@ -13,6 +13,7 @@ import type { Scope } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ResolvedConfig } from './config.js'
+import { handleCodexInteraction } from './interaction.js'
 import { SessionTurnProjection } from './projection/session.js'
 import { CodexRuntime } from './runtime.js'
 import type { CodexConnectionLauncher } from './runtime.js'
@@ -67,6 +68,13 @@ export class CodexAgent implements Agent {
       this.session.header.cwd ?? process.cwd(),
       this.options,
       init.launchConnection,
+      (request) =>
+        handleCodexInteraction(
+          this.hostCtx,
+          this,
+          request,
+          this.phase.kind === 'idle' ? undefined : this.phase.abort.signal,
+        ),
     )
   }
 

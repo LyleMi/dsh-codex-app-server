@@ -34,6 +34,7 @@ export class CodexRuntime {
     private readonly cwd: string,
     private readonly options: AgentOptions,
     private readonly launcher: CodexConnectionLauncher = defaultConnectionLauncher,
+    private readonly serverRequestHandler: ServerRequestHandler = unattendedServerRequest,
   ) {}
 
   get binding(): ThreadBinding {
@@ -47,9 +48,7 @@ export class CodexRuntime {
       ...this.config,
       ...(this.options.model === undefined ? {} : { model: this.options.model }),
     }
-    const connection = (this.connection = this.launcher(effectiveConfig, this.cwd, (request) =>
-      this.handleServerRequest(request),
-    ))
+    const connection = (this.connection = this.launcher(effectiveConfig, this.cwd, this.serverRequestHandler))
     try {
       await connection.client.initialize()
       this.thread =
@@ -86,20 +85,20 @@ export class CodexRuntime {
     if (this.connection === undefined) throw new Error('Codex runtime is not connected')
     return this.connection
   }
+}
 
-  private handleServerRequest(request: JsonRpcRequest): Promise<unknown> {
-    if (
-      request.method === 'item/commandExecution/requestApproval' ||
-      request.method === 'item/fileChange/requestApproval'
-    ) {
-      return Promise.resolve({ decision: 'decline' })
-    }
-    if (request.method === 'item/tool/requestUserInput') return Promise.resolve({ answers: {} })
-    if (request.method === 'mcpServer/elicitation/request') {
-      return Promise.resolve({ action: 'decline', content: null, _meta: null })
-    }
-    return Promise.reject(new Error(`no safe unattended response for ${request.method}`))
+function unattendedServerRequest(request: JsonRpcRequest): Promise<unknown> {
+  if (
+    request.method === 'item/commandExecution/requestApproval' ||
+    request.method === 'item/fileChange/requestApproval'
+  ) {
+    return Promise.resolve({ decision: 'decline' })
   }
+  if (request.method === 'item/tool/requestUserInput') return Promise.resolve({ answers: {} })
+  if (request.method === 'mcpServer/elicitation/request') {
+    return Promise.resolve({ action: 'decline', content: null, _meta: null })
+  }
+  return Promise.reject(new Error(`no safe unattended response for ${request.method}`))
 }
 
 function defaultConnectionLauncher(
