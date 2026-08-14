@@ -18,6 +18,17 @@ export interface ThreadBinding {
 
 export type ServerRequestHandler = (request: JsonRpcRequest) => Promise<unknown>
 
+type SandboxPolicy =
+  | { type: 'dangerFullAccess' }
+  | { type: 'readOnly'; networkAccess: boolean }
+  | {
+      type: 'workspaceWrite'
+      writableRoots: string[]
+      networkAccess: boolean
+      excludeTmpdirEnvVar: boolean
+      excludeSlashTmp: boolean
+    }
+
 /** Typed client for the stable App Server operations used by the Agent driver. */
 export class AppServerClient {
   private readonly transport: AppServerTransport
@@ -124,6 +135,7 @@ export class AppServerClient {
       threadId: binding.thread.id,
       callbacks,
       completion,
+      turnReady: Promise.withResolvers<void>(),
     }
     this.activeTurn = active
     this.interruptPending = false
@@ -132,6 +144,7 @@ export class AppServerClient {
         await this.transport.request('turn/start', {
           threadId: binding.thread.id,
           input: [{ type: 'text', text: input, text_elements: [] }],
+          sandboxPolicy: turnSandboxPolicy(this.config, binding.cwd),
           ...(this.config.model === undefined ? {} : { model: this.config.model }),
           ...(this.config.reasoningEffort === undefined ? {} : { effort: this.config.reasoningEffort }),
         }),
@@ -140,8 +153,14 @@ export class AppServerClient {
         throw new CodexAppServerError('THREAD_MISMATCH', 'turn/start response disagrees with early turn notification')
       }
       active.turnId = started.id
+      active.turnReady.resolve()
+      if (this.interruptPending) {
+        this.interruptPending = false
+        await this.sendInterrupt(active)
+      }
       return await completion.promise
     } finally {
+      active.turnReady.resolve()
       this.interruptPending = false
       if (this.activeTurn === active) this.activeTurn = undefined
     }
@@ -168,7 +187,11 @@ export class AppServerClient {
   /** Add model-visible input to the active turn at App Server's native steer boundary. */
   async steer(input: string): Promise<void> {
     const active = this.activeTurn
-    if (active?.turnId === undefined) throw new CodexAppServerError('PROTOCOL_INVALID', 'no active turn to steer')
+    if (active === undefined) throw new CodexAppServerError('PROTOCOL_INVALID', 'no active turn to steer')
+    await active.turnReady.promise
+    if (this.activeTurn !== active || active.turnId === undefined) {
+      throw new CodexAppServerError('PROTOCOL_INVALID', 'active turn ended before it could be steered')
+    }
     await this.transport.request('turn/steer', {
       threadId: active.threadId,
       expectedTurnId: active.turnId,
@@ -216,5 +239,18 @@ export class AppServerClient {
     const active = requireActiveRoute(this.activeTurn, request.params)
     if (active === undefined) throw new CodexAppServerError('THREAD_MISMATCH', 'server request belongs to another turn')
     return this.handleServerRequest(request)
+  }
+}
+
+function turnSandboxPolicy(config: ResolvedConfig, cwd: string): SandboxPolicy {
+  if (config.sandboxMode === 'danger-full-access') return { type: 'dangerFullAccess' }
+  const networkAccess = config.networkAccess ?? false
+  if (config.sandboxMode === 'read-only') return { type: 'readOnly', networkAccess }
+  return {
+    type: 'workspaceWrite',
+    writableRoots: [cwd],
+    networkAccess,
+    excludeTmpdirEnvVar: false,
+    excludeSlashTmp: false,
   }
 }

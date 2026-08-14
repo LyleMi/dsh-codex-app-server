@@ -256,4 +256,60 @@ describe('Codex AgentFactory and Agent', () => {
     await handle.dispose()
     await factory.dispose()
   })
+
+  it('starts a fork on a new thread and injects bounded seed history only once', async () => {
+    const { ctx, bindingRoot } = await harness()
+    const prompts: string[] = []
+    let threadNumber = 0
+    const base = mockLauncher()
+    const launcher: CodexConnectionLauncher = (config, cwd, handler) => {
+      const connection = base(config, cwd, handler)
+      connection.client.startThread = () => {
+        threadNumber += 1
+        return Promise.resolve({
+          thread: { id: `thread-${threadNumber}`, ephemeral: false, cwd, cliVersion: '0.147.0' },
+          model: 'gpt-5',
+          modelProvider: 'openai',
+          cwd,
+        })
+      }
+      const run = connection.client.startTurn.bind(connection.client)
+      connection.client.startTurn = (input, callbacks) => {
+        prompts.push(input)
+        return run(input, callbacks)
+      }
+      return connection
+    }
+    const factory = await installFactory(ctx, bindingRoot, launcher)
+    const parentId = SessionId('fork-parent')
+    const parent = await ctx.agents.create({ sessionId: parentId })
+    parent.agent.followup(
+      createUserMessage({ content: [{ type: 'text', text: 'parent question' }], source: { kind: 'user' } }),
+    )
+    await parent.agent.whenIdle()
+    const seed = structuredClone(parent.agent.session.events) as SessionEvent[]
+    await parent.dispose()
+
+    prompts.length = 0
+    const fork = await ctx.agents.create({
+      sessionId: SessionId('fork-child'),
+      seed,
+      meta: { parentSession: parentId, seedLength: seed.length },
+    })
+    fork.agent.followup(
+      createUserMessage({ content: [{ type: 'text', text: 'child first' }], source: { kind: 'user' } }),
+    )
+    await fork.agent.whenIdle()
+    fork.agent.followup(
+      createUserMessage({ content: [{ type: 'text', text: 'child second' }], source: { kind: 'user' } }),
+    )
+    await fork.agent.whenIdle()
+    expect(threadNumber).toBe(2)
+    expect(prompts[0]).toContain('Inherited DSH session context')
+    expect(prompts[0]).toContain('parent question')
+    expect(prompts[0]).toContain('child first')
+    expect(prompts[1]).toBe('child second')
+    await fork.dispose()
+    await factory.dispose()
+  })
 })

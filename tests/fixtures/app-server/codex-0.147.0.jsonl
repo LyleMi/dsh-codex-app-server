@@ -1,0 +1,7 @@
+{"id":1,"result":{"userAgent":"codex/0.147.0","platformFamily":"unix","platformOs":"linux"}}
+{"id":2,"result":{"thread":{"id":"thread-fixture","ephemeral":false,"cliVersion":"0.147.0","futureThreadField":true},"model":"gpt-5.4","modelProvider":"openai","cwd":"/workspace"}}
+{"method":"turn/started","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"inProgress","items":[],"error":null}}}
+{"method":"item/completed","params":{"threadId":"thread-fixture","turnId":"turn-fixture","item":{"type":"commandExecution","id":"command-fixture","command":"pwd","cwd":"/workspace","status":"completed","aggregatedOutput":"/workspace","exitCode":0,"durationMs":4,"futureItemField":"retained"}}}
+{"method":"item/completed","params":{"threadId":"thread-fixture","turnId":"turn-fixture","item":{"type":"fileChange","id":"file-fixture","changes":[{"path":"README.md","kind":"update"}],"status":"completed"}}}
+{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-fixture","turnId":"turn-fixture","tokenUsage":{"last":{"inputTokens":10,"cachedInputTokens":3,"outputTokens":2}}}}
+{"method":"turn/completed","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"completed","items":[{"type":"reasoning","id":"reasoning-fixture","summary":["checked"],"content":[]},{"type":"agentMessage","id":"message-fixture","text":"done","phase":"final_answer"}],"error":null,"futureTurnField":{"enabled":true}}}}

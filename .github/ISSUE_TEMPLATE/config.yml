@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/LyleMi/dsh-codex-app-server/security/advisories/new
+    about: Report security-sensitive issues privately.

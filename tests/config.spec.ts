@@ -8,13 +8,16 @@ describe('configuration and diagnostics', () => {
       command: 'codex',
       sandboxMode: 'workspace-write',
       approvalPolicy: 'on-request',
+      protocolMaxBytes: 8 * 1024 * 1024,
       unknownNotificationPolicy: 'ignore',
     })
+    expect(resolveConfig()).not.toHaveProperty('networkAccess')
   })
 
   it('rejects transport and credential arguments', () => {
     expect(() => resolveConfig({ args: ['--listen=ws://0.0.0.0:3000'] })).toThrow(/unsupported Codex argument/)
     expect(() => resolveConfig({ args: ['--config', 'oauth_token=secret'] })).toThrow(/unsupported Codex argument/)
+    expect(() => resolveConfig({ protocolMaxBytes: 0 })).toThrow(/positive safe integer/)
   })
 
   it('redacts secrets before truncating stderr', () => {

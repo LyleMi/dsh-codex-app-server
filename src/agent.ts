@@ -88,7 +88,10 @@ export class CodexAgent implements Agent {
 
   /** Start the child, handshake, and create or resume its exact thread. */
   connect(resumeThreadId?: string) {
-    return this.runtime.connect(resumeThreadId)
+    return this.runtime.connect(
+      resumeThreadId,
+      resumeThreadId === undefined ? renderSeedContext(this.session) : undefined,
+    )
   }
 
   send(message: UserMessage, target: InboxTarget, wakeup: boolean): void {
@@ -210,7 +213,7 @@ export class CodexAgent implements Agent {
       const projection = new SessionTurnProjection(this.session, turn, step, binding.model)
       const result = await this.runtime.startTurn(renderMessages(messages), projection.callbacks)
       projection.commit(result)
-      ending = turnEnding(result.status, result.error?.message, phase.cause)
+      ending = turnEnding(result.status, result.error?.message, result.error?.codexErrorInfo, phase.cause)
     } catch (error: unknown) {
       ending = phase.abort.signal.aborted
         ? { kind: 'aborted', reason: phase.cause ?? { kind: 'user' } }
@@ -240,8 +243,35 @@ function renderBlock(block: ContentBlock): string {
   throw new Error(`Codex App Server provider does not yet accept DSH ${block.type} input blocks`)
 }
 
-function turnEnding(status: string, message: string | undefined, cause: AgentCancelCause | undefined): TurnEndReason {
+const FORK_CONTEXT_MAX_BYTES = 64 * 1024
+
+function renderSeedContext(session: Session): string | undefined {
+  if (session.firstLiveSeq === 0) return undefined
+  const transcript = session
+    .deriveMessages()
+    .flatMap((message) => {
+      const text = message.content
+        .flatMap((block) => (block.type === 'text' || block.type === 'reasoning' ? [block.text] : []))
+        .join('\n')
+      return text === '' ? [] : [`[${message.role}]\n${text}`]
+    })
+    .join('\n\n')
+  if (transcript === '') return undefined
+  const heading = 'Inherited DSH session context (bounded; earlier content may be omitted):\n'
+  const budget = FORK_CONTEXT_MAX_BYTES - Buffer.byteLength(heading)
+  const bytes = Buffer.from(transcript)
+  const bounded = bytes.length <= budget ? transcript : bytes.subarray(bytes.length - budget).toString('utf8')
+  return `${heading}${bounded}`
+}
+
+function turnEnding(
+  status: string,
+  message: string | undefined,
+  codexErrorInfo: string | null | undefined,
+  cause: AgentCancelCause | undefined,
+): TurnEndReason {
   if (status === 'completed') return { kind: 'completed' }
   if (status === 'interrupted') return { kind: 'aborted', reason: cause ?? { kind: 'user' } }
+  if (codexErrorInfo === 'contextWindowExceeded') return { kind: 'max-tokens' }
   return { kind: 'error', error: { message: message ?? `Codex turn ${status}`, code: 'CODEX_TURN_FAILED' } }
 }

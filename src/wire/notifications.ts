@@ -18,11 +18,15 @@ export interface ActiveTurn {
   turnId?: string
   callbacks: TurnCallbacks
   completion: PromiseWithResolvers<TurnValue>
+  turnReady: PromiseWithResolvers<void>
 }
 
 function matches(active: ActiveTurn, threadId: string, turnId: string): boolean {
   if (threadId !== active.threadId) return false
-  if (active.turnId === undefined) active.turnId = turnId
+  if (active.turnId === undefined) {
+    active.turnId = turnId
+    active.turnReady.resolve()
+  }
   return active.turnId === turnId
 }
 
@@ -40,6 +44,7 @@ function routeTurnLifecycle(active: ActiveTurn, method: string, params: unknown)
   const turn = parseTurn(value['turn'], `${method}.turn`)
   if (active.turnId !== undefined && active.turnId !== turn.id) return true
   active.turnId = turn.id
+  active.turnReady.resolve()
   if (method === 'turn/completed') active.completion.resolve(turn)
   return true
 }

@@ -1,0 +1,36 @@
+name: Bug report
+description: Report a reproducible runtime or integration defect.
+title: '[bug] '
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include tokens, auth URLs, account identifiers, or private home paths. Use private vulnerability reporting for security issues.
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+    validations:
+      required: true
+  - type: input
+    id: compatibility
+    attributes:
+      label: Node, DSH, Codex, and OS versions
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics

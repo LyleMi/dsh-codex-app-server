@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+          cache: npm
+      - name: Install Reforge gate
+        run: cargo install --git https://github.com/LyleMi/Reforge --rev fd5a11ce8271e70dddd4dca75d51f08d05235669 --locked reforge
+      - run: npm ci
+      - run: npm run check
+
+  package-smoke:
+    name: package smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Install packed artifact
+        shell: bash
+        run: |
+          package_path=$(npm pack --silent)
+          smoke_root=$(mktemp -d)
+          npm install --prefix "$smoke_root" "$PWD/$package_path"
+          cd "$smoke_root"
+          node --input-type=module -e "import('dsh-codex-app-server')"

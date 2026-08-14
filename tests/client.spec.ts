@@ -36,7 +36,7 @@ class ProtocolPeer {
   }
 }
 
-function fixture(): {
+function fixture(config = resolveConfig()): {
   client: AppServerClient
   server: PassThrough
   peer: ProtocolPeer
@@ -52,7 +52,7 @@ function fixture(): {
   return {
     server,
     peer: new ProtocolPeer(fromClient),
-    client: new AppServerClient(process, resolveConfig(), vi.fn()),
+    client: new AppServerClient(process, config, vi.fn()),
   }
 }
 
@@ -99,6 +99,16 @@ describe('AppServerClient protocol fixture', () => {
     ] as const) {
       const running = client.startTurn(`ask ${answer}`)
       const request = await peer.next()
+      expect(request).toMatchObject({
+        method: 'turn/start',
+        params: {
+          sandboxPolicy: {
+            type: 'workspaceWrite',
+            writableRoots: ['/workspace'],
+            networkAccess: false,
+          },
+        },
+      })
       server.write(
         `${JSON.stringify({ method: 'turn/started', params: { threadId: 'thread-1', turn: turn(turnId) } })}\n`,
       )
@@ -142,6 +152,44 @@ describe('AppServerClient protocol fixture', () => {
     )
     await expect(running).rejects.toMatchObject({ code: 'UNKNOWN_SERVER_REQUEST' })
     await expect(peer.next()).resolves.toMatchObject({ id: 99, error: { code: -32_601 } })
+    client.close()
+  })
+
+  it('queues native steer and interrupt until turn/start supplies the turn id', async () => {
+    const { client, server, peer } = fixture()
+    await connect(client, server, peer)
+    const running = client.startTurn('begin')
+    const start = await peer.next()
+    const steering = client.steer('correction')
+    const interrupting = client.interrupt()
+    server.write(`${JSON.stringify({ id: start['id'], result: { turn: turn('turn-4') } })}\n`)
+
+    const firstControl = await peer.next()
+    const secondControl = await peer.next()
+    expect([firstControl['method'], secondControl['method']].sort()).toEqual(['turn/interrupt', 'turn/steer'])
+    for (const control of [firstControl, secondControl]) {
+      server.write(`${JSON.stringify({ id: control['id'], result: {} })}\n`)
+    }
+    server.write(
+      `${JSON.stringify({
+        method: 'turn/completed',
+        params: { threadId: 'thread-1', turn: { ...turn('turn-4'), status: 'interrupted' } },
+      })}\n`,
+    )
+    await expect(Promise.all([running, steering, interrupting])).resolves.toBeDefined()
+    client.close()
+  })
+
+  it('can fail the active turn on an unknown notification', async () => {
+    const { client, server, peer } = fixture(resolveConfig({ unknownNotificationPolicy: 'fail-turn' }))
+    await connect(client, server, peer)
+    const running = client.startTurn('wait')
+    const request = await peer.next()
+    server.write(`${JSON.stringify({ id: request['id'], result: { turn: turn('turn-5') } })}\n`)
+    server.write(
+      `${JSON.stringify({ method: 'future/notification', params: { threadId: 'thread-1', turnId: 'turn-5' } })}\n`,
+    )
+    await expect(running).rejects.toMatchObject({ code: 'PROTOCOL_INVALID' })
     client.close()
   })
 })

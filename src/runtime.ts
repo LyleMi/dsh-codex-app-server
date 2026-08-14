@@ -28,6 +28,7 @@ export type CodexConnectionLauncher = (
 export class CodexRuntime {
   private connection: CodexConnection | undefined
   private thread: ThreadBinding | undefined
+  private pendingSeed: string | undefined
 
   constructor(
     private readonly config: ResolvedConfig,
@@ -42,7 +43,7 @@ export class CodexRuntime {
     return this.thread
   }
 
-  async connect(resumeThreadId?: string): Promise<ThreadBinding> {
+  async connect(resumeThreadId?: string, seedContext?: string): Promise<ThreadBinding> {
     if (this.connection !== undefined) throw new Error('Codex runtime is already connected')
     const effectiveConfig: ResolvedConfig = {
       ...this.config,
@@ -55,6 +56,7 @@ export class CodexRuntime {
         resumeThreadId === undefined
           ? await connection.client.startThread(this.cwd)
           : await connection.client.resumeThread(resumeThreadId, this.cwd)
+      if (resumeThreadId === undefined) this.pendingSeed = seedContext
       return this.thread
     } catch (error: unknown) {
       connection.client.close()
@@ -64,7 +66,10 @@ export class CodexRuntime {
   }
 
   startTurn(input: string, callbacks: TurnCallbacks): Promise<TurnValue> {
-    return this.requireConnection().client.startTurn(input, callbacks)
+    const seed = this.pendingSeed
+    this.pendingSeed = undefined
+    const prompt = seed === undefined ? input : `${seed}\n\nCurrent user input:\n${input}`
+    return this.requireConnection().client.startTurn(prompt, callbacks)
   }
 
   steer(input: string): Promise<void> {

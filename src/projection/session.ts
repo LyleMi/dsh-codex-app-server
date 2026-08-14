@@ -89,7 +89,7 @@ export class SessionTurnProjection {
         step: this.step,
         chunk: {
           type: 'finish',
-          reason: result.status === 'completed' ? { kind: 'stop' } : { kind: 'error', failure: failureOf(result) },
+          reason: finishReason(result),
         },
       }).seq,
     )
@@ -141,4 +141,17 @@ function failureOf(result: TurnValue): { message: string; code: string } {
     message: result.error?.message ?? `Codex turn ended with status ${result.status}`,
     code: 'CODEX_TURN_FAILED',
   }
+}
+
+function finishReason(
+  result: TurnValue,
+):
+  | { kind: 'stop' }
+  | { kind: 'max-tokens' }
+  | { kind: 'aborted'; failure: { message: string; code: string } }
+  | { kind: 'error'; failure: { message: string; code: string } } {
+  if (result.status === 'completed') return { kind: 'stop' }
+  if (result.error?.codexErrorInfo === 'contextWindowExceeded') return { kind: 'max-tokens' }
+  if (result.status === 'interrupted') return { kind: 'aborted', failure: failureOf(result) }
+  return { kind: 'error', failure: failureOf(result) }
 }
