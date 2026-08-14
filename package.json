@@ -21,6 +21,11 @@
     "node": ">=22.19.0"
   },
   "packageManager": "npm@10.9.8",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public",
+    "tag": "beta"
+  },
   "files": [
     "lib",
     "cordis.patch.yml",
