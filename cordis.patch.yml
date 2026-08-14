@@ -1,0 +1,8 @@
+# Replace the base DSH driver while preserving every host, persistence, UI,
+# protocol, filesystem, subprocess, permission, and sandbox provider.
+- id: agent-loop
+  disabled: true
+
+- insert:
+    - id: dsh-codex-app-server
+      name: dsh-codex-app-server
