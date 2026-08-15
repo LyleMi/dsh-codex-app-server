@@ -15,6 +15,7 @@ export interface Config {
   networkAccess?: boolean
   startupTimeoutMs?: number
   requestIdleTimeoutMs?: number
+  turnIdleTimeoutMs?: number
   interruptGraceMs?: number
   disposeGraceMs?: number
   stderrMaxBytes?: number
@@ -34,6 +35,7 @@ export interface ResolvedConfig {
   networkAccess?: boolean
   startupTimeoutMs: number
   requestIdleTimeoutMs: number
+  turnIdleTimeoutMs: number
   interruptGraceMs: number
   disposeGraceMs: number
   stderrMaxBytes: number
@@ -75,6 +77,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     ...(config.networkAccess === undefined ? {} : { networkAccess: config.networkAccess }),
     startupTimeoutMs: positiveInteger('startupTimeoutMs', config.startupTimeoutMs, 15_000),
     requestIdleTimeoutMs: positiveInteger('requestIdleTimeoutMs', config.requestIdleTimeoutMs, 120_000),
+    turnIdleTimeoutMs: positiveInteger('turnIdleTimeoutMs', config.turnIdleTimeoutMs, 120_000),
     interruptGraceMs: positiveInteger('interruptGraceMs', config.interruptGraceMs, 3_000),
     disposeGraceMs: positiveInteger('disposeGraceMs', config.disposeGraceMs, 5_000),
     stderrMaxBytes: positiveInteger('stderrMaxBytes', config.stderrMaxBytes, 64 * 1024),

@@ -59,18 +59,21 @@ Configure the inserted `dsh-codex-app-server` row through the normal Cordis prof
 | `networkAccess`             | `false`                            | Per-turn sandbox network access                                      |
 | `startupTimeoutMs`          | `15000`                            | Initialize handshake timeout                                         |
 | `requestIdleTimeoutMs`      | `120000`                           | JSON-RPC request timeout                                             |
-| `interruptGraceMs`          | `3000`                             | Interrupt request timeout                                            |
+| `turnIdleTimeoutMs`         | `120000`                           | Idle turn deadline before interrupt and process recovery             |
+| `interruptGraceMs`          | `3000`                             | Grace after interrupt before process recovery                        |
 | `disposeGraceMs`            | `5000`                             | Grace before forced process-tree termination                         |
 | `stderrMaxBytes`            | `65536`                            | Bounded, redacted diagnostic buffer                                  |
 | `protocolMaxBytes`          | `8388608`                          | Maximum JSONL frame size                                             |
 | `unknownNotificationPolicy` | `ignore`                           | `ignore` or fail the active turn with `fail-turn`                    |
 | `bindingRoot`               | `~/.dsh/codex-app-server-bindings` | Plugin-owned durable thread mapping directory                        |
 
-User prompts never enter process argv. The default sandbox has no network access. Missing DSH approval or question providers produce a conservative decline/empty answer.
+User prompts never enter process argv. The default sandbox has no network access. Missing DSH approval or question providers produce a conservative decline/empty answer. Secret and explicitly nonblocking Codex questions also return no answer because DSH rc.6 has no matching safe interaction seam.
 
 ## Lifecycle and persistence
 
 Each live DSH Agent owns one Codex process and one non-ephemeral Codex thread. Creation is unpublished until setup, connection, and durable binding complete. Rollback reverses registry/session/process ownership. Resume requires DSH session persistence plus an exact plugin-owned `{session, thread, cwd fingerprint}` binding; a missing or mismatched binding fails instead of opening a context-free thread.
+
+An active turn must continue producing correlated App Server activity. When it remains idle past `turnIdleTimeoutMs`, the driver requests an interrupt; if completion still does not arrive within `interruptGraceMs`, it closes the transport, terminates the process tree, and reconnects by resuming the exact durable thread on the next turn. Explicit interrupts use the same bounded recovery path. App Server warnings, deprecations, configuration warnings, model reroutes, and terminal turn errors are surfaced through the plugin logger with bounded secret redaction.
 
 A DSH fork always starts a new Codex thread. Its first turn receives at most 64 KiB of text/reasoning projected from the fork seed. Later turns rely on the new native thread and do not repeat the seed.
 
@@ -81,7 +84,7 @@ npm ci
 npm run check
 ```
 
-Reforge is a required gate. `npm run check` fails on Reforge warnings as well as format, lint, type, test, build, or package errors.
+Reforge and coverage are required gates. `npm run check` also verifies formatting, lint, types, tests, source maps, build output, and package contents. Run `npm run protocol:check` whenever the installed Codex baseline changes; it compares the complete generated App Server TypeScript contract and request/notification method sets against the reviewed `0.147.0` snapshot.
 
 The real smoke is opt-in and does not inspect credential files:
 
@@ -99,7 +102,8 @@ Uninstall this bundle with the DSH plugin removal command for the same profile. 
 
 ## Known limitations
 
-- DSH `0.1.0-rc.6` does not expose public downstream Session event registration. Codex command/file item detail therefore cannot yet be stored as honest plugin-owned DSH events or projected as native DSH tool calls. It remains in the native Codex thread; user input, reasoning, commentary/final text, usage, approval audit, and question-service events use public standard DSH events.
+- DSH `0.1.0-rc.6` does not expose public downstream Session event registration. Codex command/file item detail therefore cannot yet be stored as honest plugin-owned DSH events or projected as native DSH tool calls. It remains in the native Codex thread; user input, reasoning, commentary/final text, usage, and approval audit use public standard DSH events. The public question service does not currently append an equivalent durable question audit pair.
+- User image blocks are supported when a DSH attachment store is installed: verified bytes are read by reference and sent as bounded data URLs. Text, reasoning, and images are accepted as input; tool-call and tool-result blocks are rejected instead of being mistranslated.
 - Codex tools are not DSH tools. This release deliberately does not pretend otherwise or inject DSH tool schemas into prompts.
 - MCP elicitation is declined because there is no complete DSH mapping yet.
 - One Agent permits only one active Codex turn. Native steering is serialized onto that turn.

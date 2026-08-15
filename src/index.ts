@@ -35,6 +35,7 @@ export class CodexAppServerPlugin extends Service {
     networkAccess: z.boolean(),
     startupTimeoutMs: z.number().step(1).min(1).default(15_000),
     requestIdleTimeoutMs: z.number().step(1).min(1).default(120_000),
+    turnIdleTimeoutMs: z.number().step(1).min(1).default(120_000),
     interruptGraceMs: z.number().step(1).min(1).default(3_000),
     disposeGraceMs: z.number().step(1).min(1).default(5_000),
     stderrMaxBytes: z.number().step(1).min(1).default(65_536),

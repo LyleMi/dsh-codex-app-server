@@ -8,6 +8,7 @@ describe('configuration and diagnostics', () => {
       command: 'codex',
       sandboxMode: 'workspace-write',
       approvalPolicy: 'on-request',
+      turnIdleTimeoutMs: 120_000,
       protocolMaxBytes: 8 * 1024 * 1024,
       unknownNotificationPolicy: 'ignore',
     })

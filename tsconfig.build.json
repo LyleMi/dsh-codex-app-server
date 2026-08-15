@@ -4,7 +4,8 @@
     "rootDir": "src",
     "outDir": "lib",
     "declaration": true,
-    "sourceMap": true
+    "sourceMap": true,
+    "inlineSources": true
   },
   "include": ["src/**/*.ts"],
   "exclude": ["tests"]

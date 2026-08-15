@@ -8,6 +8,7 @@ import type {
   InboxTarget,
 } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type AttachmentStore from '@deepseek-ai/dsh-attachment'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
@@ -17,6 +18,7 @@ import { handleCodexInteraction } from './interaction.js'
 import { SessionTurnProjection } from './projection/session.js'
 import { CodexRuntime } from './runtime.js'
 import type { CodexConnectionLauncher } from './runtime.js'
+import type { TurnInput } from './wire/protocol.js'
 
 type Phase =
   | { kind: 'idle'; lastTurn: number }
@@ -63,19 +65,19 @@ export class CodexAgent implements Agent {
     this.phase = { kind: 'idle', lastTurn }
     this.scope = createScope(this.hostCtx, this)
     this.ctx = this.scope.ctx.extend({ agent: this })
-    this.runtime = new CodexRuntime(
-      init.config,
-      this.session.header.cwd ?? process.cwd(),
-      this.options,
-      init.launchConnection,
-      (request) =>
+    this.runtime = new CodexRuntime(init.config, this.session.header.cwd ?? process.cwd(), this.options, {
+      ...(init.launchConnection === undefined ? {} : { launcher: init.launchConnection }),
+      serverRequestHandler: (request) =>
         handleCodexInteraction(
           this.hostCtx,
           this,
           request,
           this.phase.kind === 'idle' ? undefined : this.phase.abort.signal,
         ),
-    )
+      protocolDiagnostic: (diagnostic) => {
+        this.hostCtx.logger('dsh-codex-app-server')[diagnostic.level]('%s: %s', diagnostic.method, diagnostic.message)
+      },
+    })
   }
 
   get status(): AgentStatus {
@@ -113,8 +115,9 @@ export class CodexAgent implements Agent {
     this.inbox.append('next-step', message)
     const claimed = this.inbox.claim('next-step', this.phase.turn)
     for (const item of claimed) this.session.append('user/message', item, { surfaceOp: 'append' })
-    const prompt = renderMessages(claimed)
-    void this.runtime.steer(prompt).catch((error) => this.failLive(error))
+    void renderMessages(this.hostCtx, claimed, this.phase.abort.signal)
+      .then((input) => this.runtime.steer(input))
+      .catch((error) => this.failLive(error))
   }
 
   inject(message: UserMessage): void {
@@ -211,7 +214,8 @@ export class CodexAgent implements Agent {
     try {
       for (const message of messages) this.session.append('user/message', message, { surfaceOp: 'append' })
       const projection = new SessionTurnProjection(this.session, turn, step, binding.model)
-      const result = await this.runtime.startTurn(renderMessages(messages), projection.callbacks)
+      const input = await renderMessages(this.hostCtx, messages, phase.abort.signal)
+      const result = await this.runtime.startTurn(input, projection.callbacks)
       projection.commit(result)
       ending = turnEnding(result.status, result.error?.message, result.error?.codexErrorInfo, phase.cause)
     } catch (error: unknown) {
@@ -234,13 +238,34 @@ export class CodexAgent implements Agent {
   }
 }
 
-function renderMessages(messages: readonly UserMessage[]): string {
-  return messages.map((message) => message.content.map(renderBlock).join('\n')).join('\n\n')
+async function renderMessages(
+  ctx: Context,
+  messages: readonly UserMessage[],
+  signal?: AbortSignal,
+): Promise<TurnInput[]> {
+  const input: TurnInput[] = []
+  for (const [messageIndex, message] of messages.entries()) {
+    if (messageIndex > 0) input.push({ type: 'text', text: '\n\n', text_elements: [] })
+    for (const [blockIndex, block] of message.content.entries()) {
+      if (blockIndex > 0) input.push({ type: 'text', text: '\n', text_elements: [] })
+      input.push(await renderBlock(ctx, block, signal))
+    }
+  }
+  return input
 }
 
-function renderBlock(block: ContentBlock): string {
-  if (block.type === 'text' || block.type === 'reasoning') return block.text
-  throw new Error(`Codex App Server provider does not yet accept DSH ${block.type} input blocks`)
+async function renderBlock(ctx: Context, block: ContentBlock, signal?: AbortSignal): Promise<TurnInput> {
+  if (block.type === 'text' || block.type === 'reasoning') {
+    return { type: 'text', text: block.text, text_elements: [] }
+  }
+  if (block.type === 'image') {
+    const attachments: AttachmentStore | undefined = ctx.get('attachments')
+    if (attachments === undefined) throw new Error('cannot send DSH image input without an attachment store')
+    const stored = await attachments.readImage(block.attachment, signal)
+    const encoded = Buffer.from(stored.data).toString('base64')
+    return { type: 'image', url: `data:${stored.ref.mediaType};base64,${encoded}` }
+  }
+  throw new Error(`Codex App Server provider does not accept DSH ${block.type} input blocks`)
 }
 
 const FORK_CONTEXT_MAX_BYTES = 64 * 1024

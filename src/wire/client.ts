@@ -1,11 +1,13 @@
 import type { ResolvedConfig } from '../config.js'
 import { CodexAppServerError } from '../errors.js'
+import { packageVersion } from '../package.js'
 import type { CodexProcess } from '../process.js'
-import type { JsonRpcRequest, ThreadValue, TurnValue } from './protocol.js'
+import type { JsonRpcRequest, ThreadValue, TurnInput, TurnValue } from './protocol.js'
 import { parseInitializeResult, parseThreadResult, parseTurnStartResult } from './protocol.js'
 import { AppServerTransport } from './transport.js'
-import type { ActiveTurn, TurnCallbacks } from './notifications.js'
+import type { ActiveTurn, ProtocolDiagnostic, TurnCallbacks } from './notifications.js'
 import { requireActiveRoute, routeNotification } from './notifications.js'
+import { TurnWatchdog } from './watchdog.js'
 
 export type { TurnCallbacks } from './notifications.js'
 
@@ -17,6 +19,16 @@ export interface ThreadBinding {
 }
 
 export type ServerRequestHandler = (request: JsonRpcRequest) => Promise<unknown>
+
+export const SUPPORTED_SERVER_REQUEST_METHODS = [
+  'item/commandExecution/requestApproval',
+  'item/fileChange/requestApproval',
+  'item/tool/requestUserInput',
+  'item/permissions/requestApproval',
+  'mcpServer/elicitation/request',
+] as const
+
+const supportedServerRequests = new Set<string>(SUPPORTED_SERVER_REQUEST_METHODS)
 
 type SandboxPolicy =
   | { type: 'dangerFullAccess' }
@@ -35,12 +47,15 @@ export class AppServerClient {
   private activeTurn: ActiveTurn | undefined
   private binding: ThreadBinding | undefined
   private interruptPending = false
+  private readonly watchdog: TurnWatchdog
 
   constructor(
     private readonly process: CodexProcess,
     private readonly config: ResolvedConfig,
     private readonly handleServerRequest: ServerRequestHandler,
+    private readonly handleDiagnostic: (diagnostic: ProtocolDiagnostic) => void = () => {},
   ) {
+    this.watchdog = new TurnWatchdog(config.turnIdleTimeoutMs, config.interruptGraceMs)
     this.transport = new AppServerTransport(
       process.child.stdout,
       process.child.stdin,
@@ -48,7 +63,7 @@ export class AppServerClient {
       {
         notification: (message) => this.receiveNotification(message.method, message.params),
         request: (request) => this.onServerRequest(request),
-        protocolError: () => {},
+        protocolError: (error) => this.activeTurn?.completion.reject(error),
       },
       config.protocolMaxBytes,
     )
@@ -74,7 +89,7 @@ export class AppServerClient {
         clientInfo: {
           name: 'dsh-codex-app-server',
           title: 'DSH Codex App Server',
-          version: '0.1.0-beta.0',
+          version: packageVersion,
         },
         capabilities: { experimentalApi: false },
       },
@@ -97,7 +112,7 @@ export class AppServerClient {
         ephemeral: false,
       }),
     )
-    this.assertWorkspace(cwd, result.cwd)
+    assertWorkspace(cwd, result.cwd)
     this.binding = result
     return result
   }
@@ -120,13 +135,13 @@ export class AppServerClient {
         `thread/resume returned ${result.thread.id} instead of ${threadId}`,
       )
     }
-    this.assertWorkspace(cwd, result.cwd)
+    assertWorkspace(cwd, result.cwd)
     this.binding = result
     return result
   }
 
   /** Run the sole active turn and settle only on its correlated completion notification. */
-  async startTurn(input: string, callbacks: TurnCallbacks = {}): Promise<TurnValue> {
+  async startTurn(input: string | readonly TurnInput[], callbacks: TurnCallbacks = {}): Promise<TurnValue> {
     const binding = this.binding
     if (binding === undefined) throw new CodexAppServerError('PROTOCOL_INVALID', 'thread has not been started')
     if (this.activeTurn !== undefined) throw new CodexAppServerError('PROTOCOL_INVALID', 'a turn is already active')
@@ -136,6 +151,7 @@ export class AppServerClient {
       callbacks,
       completion,
       turnReady: Promise.withResolvers<void>(),
+      activity: () => this.touchTurn(active),
     }
     this.activeTurn = active
     this.interruptPending = false
@@ -143,7 +159,7 @@ export class AppServerClient {
       const started = parseTurnStartResult(
         await this.transport.request('turn/start', {
           threadId: binding.thread.id,
-          input: [{ type: 'text', text: input, text_elements: [] }],
+          input: normalizeTurnInput(input),
           sandboxPolicy: turnSandboxPolicy(this.config, binding.cwd),
           ...(this.config.model === undefined ? {} : { model: this.config.model }),
           ...(this.config.reasoningEffort === undefined ? {} : { effort: this.config.reasoningEffort }),
@@ -154,12 +170,15 @@ export class AppServerClient {
       }
       active.turnId = started.id
       active.turnReady.resolve()
+      this.touchTurn(active)
       if (this.interruptPending) {
         this.interruptPending = false
         await this.sendInterrupt(active)
+        this.armDeadline(active, 'INTERRUPT_TIMEOUT', 'Codex turn did not complete after interrupt')
       }
       return await completion.promise
     } finally {
+      this.watchdog.clear()
       active.turnReady.resolve()
       this.interruptPending = false
       if (this.activeTurn === active) this.activeTurn = undefined
@@ -172,7 +191,15 @@ export class AppServerClient {
     if (active === undefined) return
     this.interruptPending = true
     if (active.turnId === undefined) return
-    await this.sendInterrupt(active)
+    this.interruptPending = false
+    try {
+      await this.sendInterrupt(active)
+    } catch (error: unknown) {
+      const failure = turnTimeout('INTERRUPT_TIMEOUT', 'Codex interrupt request did not complete', error)
+      await this.forceTurnFailure(active, failure)
+      throw failure
+    }
+    this.armDeadline(active, 'INTERRUPT_TIMEOUT', 'Codex turn did not complete after interrupt')
   }
 
   private async sendInterrupt(active: ActiveTurn): Promise<void> {
@@ -185,7 +212,7 @@ export class AppServerClient {
   }
 
   /** Add model-visible input to the active turn at App Server's native steer boundary. */
-  async steer(input: string): Promise<void> {
+  async steer(input: string | readonly TurnInput[]): Promise<void> {
     const active = this.activeTurn
     if (active === undefined) throw new CodexAppServerError('PROTOCOL_INVALID', 'no active turn to steer')
     await active.turnReady.promise
@@ -195,7 +222,7 @@ export class AppServerClient {
     await this.transport.request('turn/steer', {
       threadId: active.threadId,
       expectedTurnId: active.turnId,
-      input: [{ type: 'text', text: input, text_elements: [] }],
+      input: normalizeTurnInput(input),
     })
   }
 
@@ -206,40 +233,97 @@ export class AppServerClient {
 
   private receiveNotification(method: string, params: unknown): void {
     const active = this.activeTurn
-    routeNotification(active, this.config, method, params)
+    routeNotification(active, this.config, method, params, this.handleDiagnostic)
     if (this.interruptPending && active?.turnId !== undefined) {
       this.interruptPending = false
-      void this.sendInterrupt(active).catch((error) => active.completion.reject(error))
+      void this.sendInterrupt(active).then(
+        () => this.armDeadline(active, 'INTERRUPT_TIMEOUT', 'Codex turn did not complete after interrupt'),
+        (error) =>
+          this.forceTurnFailure(
+            active,
+            turnTimeout('INTERRUPT_TIMEOUT', 'Codex interrupt request did not complete', error),
+          ),
+      )
     }
   }
 
-  private assertWorkspace(expected: string, actual: string): void {
-    if (expected !== actual) {
-      throw new CodexAppServerError(
-        'THREAD_MISMATCH',
-        `App Server cwd ${JSON.stringify(actual)} does not match session cwd`,
+  private touchTurn(active: ActiveTurn): void {
+    if (this.activeTurn !== active || active.turnId === undefined) return
+    this.watchdog.touch(() => {
+      void this.sendInterrupt(active).then(
+        () =>
+          this.armDeadline(
+            active,
+            'TURN_IDLE_TIMEOUT',
+            `Codex turn was idle for ${this.config.turnIdleTimeoutMs}ms and did not stop after interrupt`,
+          ),
+        (error) =>
+          this.forceTurnFailure(
+            active,
+            turnTimeout('TURN_IDLE_TIMEOUT', 'Codex idle-turn interrupt request did not complete', error),
+          ),
       )
-    }
+    })
+  }
+
+  private armDeadline(active: ActiveTurn, code: 'TURN_IDLE_TIMEOUT' | 'INTERRUPT_TIMEOUT', message: string): void {
+    if (this.activeTurn !== active) return
+    this.watchdog.armDeadline(() => {
+      void this.forceTurnFailure(active, new CodexAppServerError(code, message))
+    })
+  }
+
+  private async forceTurnFailure(active: ActiveTurn, error: unknown): Promise<void> {
+    if (this.activeTurn !== active) return
+    active.completion.reject(error)
+    this.transport.close(error)
+    await this.process.dispose().catch(() => {})
   }
 
   private async onServerRequest(request: JsonRpcRequest): Promise<unknown> {
-    const known = new Set([
-      'item/commandExecution/requestApproval',
-      'item/fileChange/requestApproval',
-      'item/tool/requestUserInput',
-      'item/permissions/requestApproval',
-      'mcpServer/elicitation/request',
-    ])
-    if (!known.has(request.method)) {
-      this.activeTurn?.completion.reject(
-        new CodexAppServerError('UNKNOWN_SERVER_REQUEST', `unsupported App Server request ${request.method}`),
-      )
-      throw new CodexAppServerError('UNKNOWN_SERVER_REQUEST', `unsupported App Server request ${request.method}`)
-    }
-    const active = requireActiveRoute(this.activeTurn, request.params)
-    if (active === undefined) throw new CodexAppServerError('THREAD_MISMATCH', 'server request belongs to another turn')
-    return this.handleServerRequest(request)
+    return routeServerRequest(this.activeTurn, this.handleServerRequest, request)
   }
+}
+
+function assertWorkspace(expected: string, actual: string): void {
+  if (expected !== actual) {
+    throw new CodexAppServerError(
+      'THREAD_MISMATCH',
+      `App Server cwd ${JSON.stringify(actual)} does not match session cwd`,
+    )
+  }
+}
+
+async function routeServerRequest(
+  activeTurn: ActiveTurn | undefined,
+  handler: ServerRequestHandler,
+  request: JsonRpcRequest,
+): Promise<unknown> {
+  if (!supportedServerRequests.has(request.method)) {
+    const error = new CodexAppServerError('UNKNOWN_SERVER_REQUEST', `unsupported App Server request ${request.method}`)
+    activeTurn?.completion.reject(error)
+    throw error
+  }
+  const active = requireActiveRoute(activeTurn, request.params)
+  if (active === undefined) throw new CodexAppServerError('THREAD_MISMATCH', 'server request belongs to another turn')
+  try {
+    return await handler(request)
+  } catch (error: unknown) {
+    active.completion.reject(error)
+    throw error
+  }
+}
+
+function turnTimeout(
+  code: 'TURN_IDLE_TIMEOUT' | 'INTERRUPT_TIMEOUT',
+  message: string,
+  cause: unknown,
+): CodexAppServerError {
+  return new CodexAppServerError(code, message, { cause })
+}
+
+function normalizeTurnInput(input: string | readonly TurnInput[]): readonly TurnInput[] {
+  return typeof input === 'string' ? [{ type: 'text', text: input, text_elements: [] }] : input
 }
 
 function turnSandboxPolicy(config: ResolvedConfig, cwd: string): SandboxPolicy {

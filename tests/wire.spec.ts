@@ -78,12 +78,26 @@ describe('AppServerTransport', () => {
       output,
       1_000,
       { notification: vi.fn(), request: vi.fn(), protocolError },
-      32,
+      128,
     )
     const pending = transport.request('wait')
     await nextLine(output)
-    input.write(`${JSON.stringify({ method: 'x'.repeat(40) })}\n`)
+    input.write(`${JSON.stringify({ method: 'x'.repeat(160) })}\n`)
     await expect(pending).rejects.toMatchObject({ code: 'PROTOCOL_INVALID' })
     expect(protocolError).toHaveBeenCalledOnce()
+  })
+
+  it('rejects an outbound frame that exceeds the configured byte limit', async () => {
+    const transport = new AppServerTransport(
+      new PassThrough(),
+      new PassThrough(),
+      1_000,
+      { notification: vi.fn(), request: vi.fn(), protocolError: vi.fn() },
+      64,
+    )
+    await expect(transport.request('oversized', { value: 'x'.repeat(80) })).rejects.toMatchObject({
+      code: 'PROTOCOL_INVALID',
+    })
+    transport.close()
   })
 })

@@ -86,15 +86,33 @@ async function userInputDecision(
   if (service === undefined) return { answers: {} }
   const value = asRecord(params)
   if (!Array.isArray(value['questions'])) return { answers: {} }
-  const questions = value['questions'].map(parseQuestion)
+  if (value['isBlocking'] === false) return { answers: {} }
+  const parsed = value['questions'].map(parseQuestion)
+  if (parsed.some((question) => question.isSecret)) {
+    ctx.logger('dsh-codex-app-server').warn('declined secret Codex user-input request: DSH has no secret-input seam')
+    return { answers: {} }
+  }
+  const legacyTimeout =
+    value['isBlocking'] === undefined &&
+    typeof value['autoResolutionMs'] === 'number' &&
+    Number.isSafeInteger(value['autoResolutionMs']) &&
+    value['autoResolutionMs'] > 0
+      ? AbortSignal.timeout(value['autoResolutionMs'])
+      : undefined
+  const askSignal = combineSignals(signal, legacyTimeout)
   try {
-    const answer = await service.ask({ questions, agent, ...(signal === undefined ? {} : { signal }) })
+    const answer = await service.ask({
+      questions: parsed.map((question) => question.item),
+      agent,
+      ...(askSignal === undefined ? {} : { signal: askSignal }),
+    })
     return {
       answers: Object.fromEntries(
-        answer.answers.map((item) => [
-          item.id,
-          { answers: [...item.selected, ...(item.custom === undefined ? [] : [item.custom])] },
-        ]),
+        answer.answers.map((answerItem) => {
+          const question = parsed.find((item) => item.item.id === answerItem.id)
+          const custom = question?.isOther === false ? [] : answerItem.custom === undefined ? [] : [answerItem.custom]
+          return [answerItem.id, { answers: [...answerItem.selected, ...custom] }]
+        }),
       ),
     }
   } catch {
@@ -102,7 +120,7 @@ async function userInputDecision(
   }
 }
 
-function parseQuestion(value: unknown): AskUserQuestionItem {
+function parseQuestion(value: unknown): { item: AskUserQuestionItem; isOther: boolean; isSecret: boolean } {
   const question = asRecord(value)
   if (typeof question['id'] !== 'string' || typeof question['question'] !== 'string') {
     throw new Error('invalid Codex user-input question')
@@ -121,12 +139,22 @@ function parseQuestion(value: unknown): AskUserQuestionItem {
       })
     : undefined
   return {
-    id: question['id'],
-    question: question['question'],
-    ...(typeof question['header'] === 'string' ? { header: question['header'] } : {}),
-    ...(options === undefined ? {} : { options }),
-    multiSelect: false,
+    item: {
+      id: question['id'],
+      question: question['question'],
+      ...(typeof question['header'] === 'string' ? { header: question['header'] } : {}),
+      ...(options === undefined ? {} : { options }),
+      multiSelect: false,
+    },
+    isOther: question['isOther'] !== false,
+    isSecret: question['isSecret'] === true,
   }
+}
+
+function combineSignals(...signals: (AbortSignal | undefined)[]): AbortSignal | undefined {
+  const present = signals.filter((item): item is AbortSignal => item !== undefined)
+  if (present.length === 0) return undefined
+  return present.length === 1 ? present[0] : AbortSignal.any(present)
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

@@ -16,6 +16,8 @@
   },
   "homepage": "https://github.com/LyleMi/dsh-codex-app-server#readme",
   "type": "module",
+  "types": "./lib/index.d.ts",
+  "sideEffects": false,
   "license": "Apache-2.0",
   "engines": {
     "node": ">=22.19.0"
@@ -50,14 +52,18 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:e2e": "vitest run tests/real-codex.e2e.ts",
+    "test:coverage": "vitest run --coverage",
+    "protocol:check": "node scripts/check-codex-protocol.mjs",
     "lint": "eslint .",
-    "reforge": "reforge config validate . && reforge scan . --output human --progress never --fail-on warning",
+    "reforge": "reforge config validate . && node scripts/check-reforge.mjs",
     "format:check": "prettier --check .",
     "pack:check": "npm pack --dry-run",
-    "check": "npm run format:check && npm run lint && npm run reforge && npm run typecheck && npm run test && npm run build && npm run pack:check"
+    "prepublishOnly": "npm run check",
+    "check": "npm run format:check && npm run lint && npm run reforge && npm run typecheck && npm run test:coverage && npm run build && npm run pack:check"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-attachment": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-scope": "^0.1.0-rc.6",
@@ -68,6 +74,9 @@
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-session-persistence": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-attachment": {
       "optional": true
     },
     "@deepseek-ai/dsh-user-approval": {
@@ -84,6 +93,7 @@
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/cordis-plugin-include": "^1.0.6",
     "@deepseek-ai/cordis-plugin-loader": "^1.0.2",
+    "@deepseek-ai/dsh-attachment": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-scope": "^0.1.0-rc.6",
@@ -94,6 +104,7 @@
     "@eslint/js": "^9.33.0",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.17.1",
+    "@vitest/coverage-v8": "^3.2.4",
     "eslint": "^9.33.0",
     "prettier": "^3.6.2",
     "typescript": "^5.9.2",

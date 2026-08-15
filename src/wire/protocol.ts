@@ -24,6 +24,9 @@ export interface JsonRpcResponse {
 
 export type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcResponse
 
+/** App Server turn input subset accepted from DSH messages. */
+export type TurnInput = { type: 'text'; text: string; text_elements: [] } | { type: 'image'; url: string }
+
 /** Codex thread item fields used by the first projection version. */
 export type ThreadItem =
   | { type: 'agentMessage'; id: string; text: string; phase: string | null }

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { CodexProcess } from '../src/process.js'
 import { resolveConfig } from '../src/config.js'
 import { AppServerClient } from '../src/wire/client.js'
+import type { ProtocolDiagnostic } from '../src/wire/notifications.js'
 
 class ProtocolPeer {
   private buffer = ''
@@ -40,19 +41,23 @@ function fixture(config = resolveConfig()): {
   client: AppServerClient
   server: PassThrough
   peer: ProtocolPeer
+  dispose: ReturnType<typeof vi.fn>
 } {
   const server = new PassThrough()
   const fromClient = new PassThrough()
   const never = new Promise<never>(() => {})
+  const dispose = vi.fn(() => Promise.resolve())
   const process = {
     child: { stdout: server, stdin: fromClient },
     exited: never,
     diagnostic: '',
+    dispose,
   } as unknown as CodexProcess
   return {
     server,
     peer: new ProtocolPeer(fromClient),
     client: new AppServerClient(process, config, vi.fn()),
+    dispose,
   }
 }
 
@@ -190,6 +195,81 @@ describe('AppServerClient protocol fixture', () => {
       `${JSON.stringify({ method: 'future/notification', params: { threadId: 'thread-1', turnId: 'turn-5' } })}\n`,
     )
     await expect(running).rejects.toMatchObject({ code: 'PROTOCOL_INVALID' })
+    client.close()
+  })
+
+  it('rejects the active turn when a malformed protocol frame closes the transport', async () => {
+    const { client, server, peer } = fixture()
+    await connect(client, server, peer)
+    const running = client.startTurn('wait')
+    const request = await peer.next()
+    server.write(`${JSON.stringify({ id: request['id'], result: { turn: turn('turn-malformed') } })}\n`)
+    server.write('not json\n')
+    await expect(running).rejects.toMatchObject({ code: 'PROTOCOL_INVALID' })
+    client.close()
+  })
+
+  it('interrupts an idle turn and disposes a process that remains stuck', async () => {
+    const { client, server, peer, dispose } = fixture(
+      resolveConfig({ turnIdleTimeoutMs: 20, interruptGraceMs: 20, requestIdleTimeoutMs: 1_000 }),
+    )
+    await connect(client, server, peer)
+    const running = client.startTurn('wait forever')
+    const start = await peer.next()
+    server.write(`${JSON.stringify({ id: start['id'], result: { turn: turn('turn-idle') } })}\n`)
+    const interrupt = await peer.next()
+    expect(interrupt).toMatchObject({
+      method: 'turn/interrupt',
+      params: { threadId: 'thread-1', turnId: 'turn-idle' },
+    })
+    server.write(`${JSON.stringify({ id: interrupt['id'], result: {} })}\n`)
+    await expect(running).rejects.toMatchObject({ code: 'TURN_IDLE_TIMEOUT' })
+    expect(dispose).toHaveBeenCalledOnce()
+  })
+
+  it('fails and disposes when an explicit interrupt request times out', async () => {
+    const { client, server, peer, dispose } = fixture(
+      resolveConfig({ turnIdleTimeoutMs: 1_000, interruptGraceMs: 20, requestIdleTimeoutMs: 1_000 }),
+    )
+    await connect(client, server, peer)
+    const running = client.startTurn('wait for cancellation')
+    const start = await peer.next()
+    server.write(
+      `${JSON.stringify({ method: 'turn/started', params: { threadId: 'thread-1', turn: turn('turn-interrupt-timeout') } })}\n`,
+    )
+    server.write(`${JSON.stringify({ id: start['id'], result: { turn: turn('turn-interrupt-timeout') } })}\n`)
+    const interrupting = client.interrupt()
+    await expect(peer.next()).resolves.toMatchObject({ method: 'turn/interrupt' })
+    await expect(interrupting).rejects.toMatchObject({ code: 'INTERRUPT_TIMEOUT' })
+    await expect(running).rejects.toMatchObject({ code: 'INTERRUPT_TIMEOUT' })
+    expect(dispose).toHaveBeenCalledOnce()
+  })
+
+  it('surfaces redacted warnings and rejects terminal turn errors', async () => {
+    const server = new PassThrough()
+    const fromClient = new PassThrough()
+    const diagnostics = vi.fn<(diagnostic: ProtocolDiagnostic) => void>()
+    const process = {
+      child: { stdout: server, stdin: fromClient },
+      exited: new Promise<never>(() => {}),
+      diagnostic: '',
+      dispose: vi.fn(() => Promise.resolve()),
+    } as unknown as CodexProcess
+    const peer = new ProtocolPeer(fromClient)
+    const client = new AppServerClient(process, resolveConfig(), vi.fn(), diagnostics)
+    await connect(client, server, peer)
+    server.write(`${JSON.stringify({ method: 'configWarning', params: { message: 'access_token=secret-value' } })}\n`)
+    expect(diagnostics).toHaveBeenCalledOnce()
+    expect(diagnostics.mock.calls[0]?.[0]).toMatchObject({ level: 'warn', method: 'configWarning' })
+    expect(diagnostics.mock.calls[0]?.[0].message).not.toContain('secret-value')
+
+    const running = client.startTurn('fail')
+    const start = await peer.next()
+    server.write(`${JSON.stringify({ id: start['id'], result: { turn: turn('turn-error') } })}\n`)
+    server.write(
+      `${JSON.stringify({ method: 'error', params: { threadId: 'thread-1', turnId: 'turn-error', message: 'fatal', willRetry: false } })}\n`,
+    )
+    await expect(running).rejects.toMatchObject({ code: 'PROTOCOL_INVALID', message: 'fatal' })
     client.close()
   })
 })

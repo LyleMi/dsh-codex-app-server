@@ -1,3 +1,20 @@
+version = 2
+
+[analysis]
+enabled = ["codebase"]
+
+[scope]
+ignore-paths = []
+
+[rules]
+enable = [
+  "reforge.codebase.complex_function",
+  "reforge.codebase.deep_nesting",
+  "reforge.codebase.many_parameters",
+  "reforge.codebase.large_type",
+]
+
+[codebase]
 preset = "balanced"
 max-file-lines = 800
 max-dir-files = 40
@@ -18,7 +35,5 @@ max-small-function-ratio = 70
 min-repeated-literal-occurrences = 12
 min-data-clump-occurrences = 4
 churn = "off"
-hotspot-model = "static"
 churn-window-days = 180
 churn-max-commit-lines = 2000
-ignore-paths = []

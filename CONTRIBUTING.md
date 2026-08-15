@@ -19,6 +19,7 @@ When changing the App Server boundary:
 
 1. Record the exact `codex --version` used.
 2. Generate the official App Server TypeScript or JSON schema into a temporary directory and compare only the methods this package consumes.
+   `npm run protocol:check` performs the reviewed method-set comparison for the installed baseline and must pass before any snapshot update.
 3. Update portable fixtures with tokens, account identifiers, thread identifiers, and home paths removed.
 4. Preserve fail-closed behavior for unknown server requests.
 5. Run `RUN_REAL_CODEX=1 npm run test:e2e` with a credential-isolated local account when available.

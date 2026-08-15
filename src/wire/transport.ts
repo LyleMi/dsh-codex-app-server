@@ -84,7 +84,11 @@ export class AppServerTransport {
   }
 
   private write(message: object): void {
-    this.output.write(`${JSON.stringify(message)}\n`)
+    const frame = `${JSON.stringify(message)}\n`
+    if (Buffer.byteLength(frame) > this.maxFrameBytes) {
+      throw new CodexAppServerError('PROTOCOL_INVALID', `client frame exceeds ${this.maxFrameBytes} bytes`)
+    }
+    this.output.write(frame)
   }
 
   private receiveChunk(chunk: string): void {

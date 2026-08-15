@@ -2,6 +2,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
+import AttachmentStore, { AttachmentId } from '@deepseek-ai/dsh-attachment'
+import type { ImageAttachmentLimits } from '@deepseek-ai/dsh-attachment'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, SessionPreparation } from '@deepseek-ai/dsh-session'
@@ -9,9 +11,40 @@ import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CodexConnectionLauncher } from '../src/agent.js'
 import { resolveConfig } from '../src/config.js'
+import { CodexAppServerError } from '../src/errors.js'
 import { CodexAgentFactory } from '../src/factory.js'
+import type { TurnInput } from '../src/wire/protocol.js'
 
 const temporaryRoots: string[] = []
+
+function renderedText(input: readonly TurnInput[]): string {
+  return input.flatMap((item) => (item.type === 'text' ? [item.text] : [])).join('')
+}
+
+class TestAttachments extends AttachmentStore {
+  readonly imageLimits: ImageAttachmentLimits = {
+    maxImageBytes: 1_000,
+    maxImagesPerMessage: 1,
+    maxMessageImageBytes: 1_000,
+    maxImagePixels: 1_000,
+    mediaTypes: ['image/png'],
+  }
+
+  validateImage(): Promise<void> {
+    return Promise.resolve()
+  }
+
+  saveImage(): Promise<never> {
+    return Promise.reject(new Error('not used'))
+  }
+
+  readImage() {
+    return Promise.resolve({
+      ref: { attachmentId: AttachmentId('image-1'), mediaType: 'image/png' as const, bytes: 3, width: 1, height: 1 },
+      data: Uint8Array.from([1, 2, 3]),
+    })
+  }
+}
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
@@ -236,7 +269,7 @@ describe('Codex AgentFactory and Agent', () => {
       const connection = base(config, cwd, handler)
       const run = connection.client.startTurn.bind(connection.client)
       connection.client.startTurn = (input, callbacks) => {
-        prompts.push(input)
+        prompts.push(renderedText(input))
         return run(input, callbacks)
       }
       return connection
@@ -253,6 +286,82 @@ describe('Codex AgentFactory and Agent', () => {
     )
     await handle.agent.whenIdle()
     expect(prompts).toEqual(['quiet context\n\nwake now'])
+    await handle.dispose()
+    await factory.dispose()
+  })
+
+  it('loads durable image attachments into native Codex image inputs', async () => {
+    const { ctx, bindingRoot } = await harness()
+    await ctx.plugin(TestAttachments)
+    const captured: TurnInput[][] = []
+    const base = mockLauncher()
+    const launcher: CodexConnectionLauncher = (config, cwd, handler) => {
+      const connection = base(config, cwd, handler)
+      const run = connection.client.startTurn.bind(connection.client)
+      connection.client.startTurn = (input, callbacks) => {
+        captured.push([...input])
+        return run(input, callbacks)
+      }
+      return connection
+    }
+    const factory = await installFactory(ctx, bindingRoot, launcher)
+    const handle = await ctx.agents.create({ sessionId: SessionId('image-input') })
+    handle.agent.followup(
+      createUserMessage({
+        content: [
+          { type: 'text', text: 'inspect' },
+          {
+            type: 'image',
+            attachment: {
+              attachmentId: AttachmentId('image-1'),
+              mediaType: 'image/png',
+              bytes: 3,
+              width: 1,
+              height: 1,
+            },
+          },
+        ],
+        source: { kind: 'user' },
+      }),
+    )
+    await handle.agent.whenIdle()
+    expect(captured[0]).toEqual([
+      { type: 'text', text: 'inspect', text_elements: [] },
+      { type: 'text', text: '\n', text_elements: [] },
+      { type: 'image', url: 'data:image/png;base64,AQID' },
+    ])
+    await handle.dispose()
+    await factory.dispose()
+  })
+
+  it('relaunches and exactly resumes the thread after a turn watchdog failure', async () => {
+    const { ctx, bindingRoot } = await harness()
+    let launches = 0
+    const resumed = vi.fn()
+    const base = mockLauncher()
+    const launcher: CodexConnectionLauncher = (config, cwd, handler) => {
+      launches += 1
+      const connection = base(config, cwd, handler)
+      if (launches === 1) {
+        connection.client.startTurn = () =>
+          Promise.reject(new CodexAppServerError('TURN_IDLE_TIMEOUT', 'simulated stuck turn'))
+      } else {
+        const resume = connection.client.resumeThread.bind(connection.client)
+        connection.client.resumeThread = (threadId, resumeCwd) => {
+          resumed(threadId, resumeCwd)
+          return resume(threadId, resumeCwd)
+        }
+      }
+      return connection
+    }
+    const factory = await installFactory(ctx, bindingRoot, launcher)
+    const handle = await ctx.agents.create({ sessionId: SessionId('watchdog-recovery') })
+    handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'first' }], source: { kind: 'user' } }))
+    await handle.agent.whenIdle()
+    handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'second' }], source: { kind: 'user' } }))
+    await handle.agent.whenIdle()
+    expect(launches).toBe(2)
+    expect(resumed).toHaveBeenCalledWith('codex-thread-1', expect.any(String))
     await handle.dispose()
     await factory.dispose()
   })
@@ -275,7 +384,7 @@ describe('Codex AgentFactory and Agent', () => {
       }
       const run = connection.client.startTurn.bind(connection.client)
       connection.client.startTurn = (input, callbacks) => {
-        prompts.push(input)
+        prompts.push(renderedText(input))
         return run(input, callbacks)
       }
       return connection
