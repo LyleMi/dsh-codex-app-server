@@ -6,7 +6,7 @@
 
 本插件不会读取 Codex 凭据、把 ChatGPT 订阅换成 API Key，也不会调用 ChatGPT 私有接口。身份验证、模型权限、配额、Codex 原生工具、MCP 与 Codex 沙箱均由用户安装的官方 CLI 管理；DSH 工具仍在 DSH host 内通过其自身策略链执行。
 
-> 当前版本为 `0.1.0-beta.2`。请先在独立的 DSH profile 中试用，并阅读下方限制。本项目不受 DeepSeek 或 OpenAI 官方认可或背书。
+> 当前版本为 `0.1.0-beta.3`。请先在独立的 DSH profile 中试用，并阅读下方限制。本项目不受 DeepSeek 或 OpenAI 官方认可或背书。
 
 ## 兼容性
 

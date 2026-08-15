@@ -6,7 +6,7 @@ Experimental DeepSeek Harness bundle that runs the official Codex CLI as the DSH
 
 This package does not read Codex credentials, exchange ChatGPT subscriptions for API keys, or call private ChatGPT endpoints. Authentication, model access, quotas, Codex-native tools, MCP, and the Codex sandbox remain owned by the user-installed official CLI. DSH tools continue to execute inside the DSH host through its own policy pipeline.
 
-> Status: `0.1.0-beta.2`. Use a dedicated DSH profile and review the limitations below before relying on it for important work. This project is not endorsed by DeepSeek or OpenAI.
+> Status: `0.1.0-beta.3`. Use a dedicated DSH profile and review the limitations below before relying on it for important work. This project is not endorsed by DeepSeek or OpenAI.
 
 ## Compatibility
 
