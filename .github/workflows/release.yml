@@ -3,12 +3,6 @@ name: Release
 on:
   push:
     tags: ['v*']
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing release tag to retry
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -23,8 +17,6 @@ jobs:
     environment: npm
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.tag || github.ref }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
@@ -32,13 +24,11 @@ jobs:
           cache: pnpm
           registry-url: https://registry.npmjs.org
       - name: Verify tag matches package version
-        env:
-          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-        run: node -e "const p=require('./package.json'); if (process.env.RELEASE_TAG !== 'v'+p.version) process.exit(1)"
+        run: node -e "const p=require('./package.json'); if (process.env.GITHUB_REF_NAME !== 'v'+p.version) process.exit(1)"
       - name: Install Reforge gate
         run: cargo install --git https://github.com/LyleMi/Reforge --rev fd5a11ce8271e70dddd4dca75d51f08d05235669 --locked reforge
       - name: Verify Reforge version
         run: test "$(reforge --version)" = "reforge $REFORGE_VERSION"
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
-      - run: pnpm publish --provenance --access public --no-git-checks
+      - run: pnpm publish --provenance --access public --tag beta --no-git-checks
