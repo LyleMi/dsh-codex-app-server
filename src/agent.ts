@@ -1,4 +1,4 @@
-import { Inbox, emitAgentEvent } from '@deepseek-ai/dsh-agent'
+import { Inbox, agentEvents, assembleContextFor, emitAgentEvent } from '@deepseek-ai/dsh-agent'
 import type {
   Agent,
   AgentCancelCause,
@@ -6,8 +6,10 @@ import type {
   AgentStatus,
   CancelOptions,
   InboxTarget,
+  PreStepDecision,
 } from '@deepseek-ai/dsh-agent'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import type AttachmentStore from '@deepseek-ai/dsh-attachment'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Scope } from '@deepseek-ai/dsh-scope'
@@ -16,9 +18,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ResolvedConfig } from './config.js'
 import { handleCodexInteraction } from './interaction.js'
 import { SessionTurnProjection } from './projection/session.js'
+import { RuntimeContextProjection } from './projection/runtime-context.js'
 import { CodexRuntime } from './runtime.js'
 import type { CodexConnectionLauncher } from './runtime.js'
+import { CODEX_PROVIDER } from './models.js'
+import type { CodexTurnSelection } from './wire/client.js'
 import type { TurnInput } from './wire/protocol.js'
+import { assembleCodexBridge, executeDshDynamicTool } from './bridge.js'
 
 type Phase =
   | { kind: 'idle'; lastTurn: number }
@@ -45,6 +51,9 @@ export class CodexAgent implements Agent {
   private phase: Phase
   private activityDone: Promise<void> = Promise.resolve()
   private readonly runtime: CodexRuntime
+  private readonly events: ReturnType<typeof agentEvents>
+  private readonly configuredReasoningEffort: string | undefined
+  private readonly runtimeContext: RuntimeContextProjection
 
   private readonly hostCtx: Context
   readonly id: SessionId
@@ -54,8 +63,10 @@ export class CodexAgent implements Agent {
     this.hostCtx = init.hostCtx
     this.id = init.id
     this.session = init.session
-    const options = init.options
-    this.options = { provider: 'codex-app-server', ...(options.model === undefined ? {} : { model: options.model }) }
+    const initialModel =
+      init.config.model ?? (init.options.provider === CODEX_PROVIDER ? init.options.model : undefined)
+    this.configuredReasoningEffort = init.config.reasoningEffort
+    this.options = { provider: CODEX_PROVIDER, ...(initialModel === undefined ? {} : { model: initialModel }) }
     this.inbox = new Inbox(this.session, {
       inserted: (message) => emitAgentEvent(this.hostCtx, this, 'agent/inbox/inserted', { message }),
       discarded: (message) => emitAgentEvent(this.hostCtx, this, 'agent/inbox/discarded', { message }),
@@ -65,34 +76,37 @@ export class CodexAgent implements Agent {
     this.phase = { kind: 'idle', lastTurn }
     this.scope = createScope(this.hostCtx, this)
     this.ctx = this.scope.ctx.extend({ agent: this })
-    this.runtime = new CodexRuntime(init.config, this.session.header.cwd ?? process.cwd(), this.options, {
-      ...(init.launchConnection === undefined ? {} : { launcher: init.launchConnection }),
-      serverRequestHandler: (request) =>
-        handleCodexInteraction(
-          this.hostCtx,
-          this,
-          request,
-          this.phase.kind === 'idle' ? undefined : this.phase.abort.signal,
-        ),
-      protocolDiagnostic: (diagnostic) => {
-        this.hostCtx.logger('dsh-codex-app-server')[diagnostic.level]('%s: %s', diagnostic.method, diagnostic.message)
-      },
-    })
+    this.events = agentEvents(this.hostCtx, this)
+    this.runtimeContext = new RuntimeContextProjection(this.ctx, this.session)
+    this.runtime = createRuntime(init, initialModel, this, () =>
+      this.phase.kind === 'idle' ? undefined : this.phase.abort.signal,
+    )
   }
 
   get status(): AgentStatus {
     return this.phase.kind === 'running' ? 'running' : 'idle'
   }
 
-  get threadBinding() {
-    return this.runtime.binding
-  }
-
   /** Start the child, handshake, and create or resume its exact thread. */
-  connect(resumeThreadId?: string) {
+  async connect(resumeThreadId?: string) {
+    const selection = await resolveSelection({
+      agent: this,
+      hostCtx: this.hostCtx,
+      events: this.events,
+      fallbackModel: this.options.model,
+      configuredReasoningEffort: this.configuredReasoningEffort,
+      turn: 0,
+      step: 0,
+      signal: new AbortController().signal,
+      allowForeignDefault: true,
+    })
+    const signal = new AbortController().signal
+    const bridge = await assembleCodexBridge(this.hostCtx, this, signal)
     return this.runtime.connect(
       resumeThreadId,
       resumeThreadId === undefined ? renderSeedContext(this.session) : undefined,
+      selection,
+      bridge,
     )
   }
 
@@ -117,7 +131,7 @@ export class CodexAgent implements Agent {
     for (const item of claimed) this.session.append('user/message', item, { surfaceOp: 'append' })
     void renderMessages(this.hostCtx, claimed, this.phase.abort.signal)
       .then((input) => this.runtime.steer(input))
-      .catch((error) => this.failLive(error))
+      .catch((error) => reportLiveFailure(this, this.hostCtx, this.phase, error))
   }
 
   inject(message: UserMessage): void {
@@ -132,7 +146,7 @@ export class CodexAgent implements Agent {
     if (this.phase.kind === 'idle') return
     this.phase.abort.abort(cause)
     if (this.phase.kind === 'running') this.phase.cause ??= cause
-    void this.runtime.interrupt().catch((error) => this.failLive(error))
+    void this.runtime.interrupt().catch((error) => reportLiveFailure(this, this.hostCtx, this.phase, error))
   }
 
   async whenIdle(): Promise<void> {
@@ -140,6 +154,13 @@ export class CodexAgent implements Agent {
     do {
       await (observed = this.activityDone)
     } while (observed !== this.activityDone)
+  }
+
+  compact(signal: AbortSignal): Promise<void> {
+    return this.runMaintenance(async (maintenanceSignal) => {
+      const result = await this.runtime.compact(AbortSignal.any([signal, maintenanceSignal]))
+      if (result.status !== 'completed') throw new Error(`Codex thread compaction ${result.status}`)
+    })
   }
 
   runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -188,7 +209,7 @@ export class CodexAgent implements Agent {
     try {
       while (this.inbox.hasPending && this.phase.kind === 'running') await this.runTurn(this.phase)
     } catch (error: unknown) {
-      this.failLive(error)
+      reportLiveFailure(this, this.hostCtx, this.phase, error)
     } finally {
       if (this.phase.kind === 'running') {
         const { turn, wakeRequested } = this.phase
@@ -203,22 +224,49 @@ export class CodexAgent implements Agent {
     const turn = phase.turn + 1
     this.session.append('turn/start', { turn })
     phase.turn = turn
-    const messages = this.inbox.claim('next-turn', turn)
-    if (messages.length === 0) {
+    const claimed = this.inbox.claim('next-turn', turn)
+    if (claimed.length === 0) {
       this.session.append('turn/end', { turn, reason: { kind: 'completed' } })
       return
     }
     const step = 1
-    this.session.append('step/start', { turn, step })
     let ending: TurnEndReason = { kind: 'completed' }
+    let projection: SessionTurnProjection | undefined
     try {
-      for (const message of messages) this.session.append('user/message', message, { surfaceOp: 'append' })
-      const projection = new SessionTurnProjection(this.session, turn, step, binding.model)
-      const input = await renderMessages(this.hostCtx, messages, phase.abort.signal)
-      const result = await this.runtime.startTurn(input, projection.callbacks)
+      const selection = await resolveSelection({
+        agent: this,
+        hostCtx: this.hostCtx,
+        events: this.events,
+        fallbackModel: this.options.model ?? connectedModel(this.runtime),
+        configuredReasoningEffort: this.configuredReasoningEffort,
+        turn,
+        step,
+        signal: phase.abort.signal,
+        allowForeignDefault: false,
+      })
+      const bridge = await assembleCodexBridge(this.hostCtx, this, phase.abort.signal)
+      const context = this.runtimeContext.project(bridge.contextText, bridge.contextSections)
+      const decision = await this.events.waterfall(
+        'agent/pre-step',
+        { messages: claimed, turn, step, signal: phase.abort.signal },
+        (): Promise<PreStepDecision> =>
+          Promise.resolve({ kind: 'enter', messages: context === undefined ? claimed : [...claimed, context] }),
+      )
+      phase.abort.signal.throwIfAborted()
+      if (decision.kind === 'reject') {
+        ending = { kind: 'blocked' }
+        return
+      }
+      if (decision.messages.length === 0) return
+      this.session.append('step/start', { turn, step })
+      for (const message of decision.messages) this.session.append('user/message', message, { surfaceOp: 'append' })
+      projection = new SessionTurnProjection(this.session, turn, step, selection?.model ?? binding.model)
+      const input = await renderMessages(this.hostCtx, decision.messages, phase.abort.signal)
+      const result = await this.runtime.startTurn(input, projection.callbacks, selection, bridge)
       projection.commit(result)
       ending = turnEnding(result.status, result.error?.message, result.error?.codexErrorInfo, phase.cause)
     } catch (error: unknown) {
+      projection?.abort(error, phase.abort.signal.aborted)
       ending = phase.abort.signal.aborted
         ? { kind: 'aborted', reason: phase.cause ?? { kind: 'user' } }
         : {
@@ -227,14 +275,89 @@ export class CodexAgent implements Agent {
           }
       throw error
     } finally {
-      this.session.append('step/end', { turn, step })
+      if (this.session.events.findLast((event) => event.type === 'step/start')?.data.turn === turn) {
+        this.session.append('step/end', { turn, step })
+      }
       this.session.append('turn/end', { turn, reason: ending })
     }
   }
+}
 
-  private failLive(error: unknown): void {
-    const turn = this.phase.kind === 'running' ? this.phase.turn : this.phase.lastTurn
-    emitAgentEvent(this.hostCtx, this, 'agent/error', { turn, step: this.phase.kind === 'running' ? 1 : 0, error })
+function reportLiveFailure(agent: Agent, ctx: Context, phase: Phase, error: unknown): void {
+  const turn = phase.kind === 'running' ? phase.turn : phase.lastTurn
+  emitAgentEvent(ctx, agent, 'agent/error', { turn, step: phase.kind === 'running' ? 1 : 0, error })
+}
+
+function createRuntime(
+  init: CodexAgentInit,
+  initialModel: string | undefined,
+  agent: CodexAgent,
+  activeSignal: () => AbortSignal | undefined,
+): CodexRuntime {
+  return new CodexRuntime(
+    { ...init.config, ...(initialModel === undefined ? {} : { model: initialModel }) },
+    init.session.header.cwd ?? process.cwd(),
+    {
+      ...(init.launchConnection === undefined ? {} : { launcher: init.launchConnection }),
+      serverRequestHandler: (request) => {
+        const signal = activeSignal()
+        if (request.method !== 'item/tool/call') return handleCodexInteraction(init.hostCtx, agent, request, signal)
+        if (signal === undefined) return Promise.reject(new Error('DSH dynamic tool call arrived outside active work'))
+        return executeDshDynamicTool(init.hostCtx, agent, request, signal)
+      },
+      protocolDiagnostic: (diagnostic) => {
+        init.hostCtx.logger('dsh-codex-app-server')[diagnostic.level]('%s: %s', diagnostic.method, diagnostic.message)
+      },
+    },
+  )
+}
+
+interface SelectionRequest {
+  agent: Agent
+  hostCtx: Context
+  events: ReturnType<typeof agentEvents>
+  fallbackModel: string | undefined
+  configuredReasoningEffort: string | undefined
+  turn: number
+  step: number
+  signal: AbortSignal
+  allowForeignDefault: boolean
+}
+
+async function resolveSelection(request: SelectionRequest): Promise<CodexTurnSelection | undefined> {
+  const systemPrompt = request.hostCtx.get('systemPrompt')
+  if (systemPrompt !== undefined) await systemPrompt.assemble(assembleContextFor(request.agent, request.signal))
+  const placeholder = request.fallbackModel ?? '__codex_account_default__'
+  const base: LlmCallConfig = {
+    provider: CODEX_PROVIDER,
+    model: placeholder,
+    ...(request.configuredReasoningEffort === undefined
+      ? {}
+      : { reasoningEffort: ReasoningEffortId(request.configuredReasoningEffort) }),
+  }
+  const selected = await request.events.waterfall(
+    'agent/request',
+    { turn: request.turn, step: request.step, signal: request.signal },
+    () => Promise.resolve(base),
+  )
+  if (selected.provider !== CODEX_PROVIDER) {
+    if (request.allowForeignDefault) return undefined
+    throw new Error(
+      `Codex-only profile cannot route provider ${JSON.stringify(selected.provider)}; select a ${JSON.stringify(CODEX_PROVIDER)} model for this session`,
+    )
+  }
+  if (selected.model === placeholder && request.fallbackModel === undefined) return undefined
+  return {
+    model: selected.model,
+    ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }),
+  }
+}
+
+function connectedModel(runtime: CodexRuntime): string | undefined {
+  try {
+    return runtime.binding.model
+  } catch {
+    return undefined
   }
 }
 

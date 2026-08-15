@@ -4,7 +4,7 @@
 
 Experimental DeepSeek Harness bundle that runs the official Codex CLI as the DSH `AgentFactory` through `codex app-server --stdio`.
 
-This package does not read Codex credentials, exchange ChatGPT subscriptions for API keys, or call private ChatGPT endpoints. Authentication, model access, quotas, tools, MCP, and sandbox execution remain owned by the user-installed Codex CLI.
+This package does not read Codex credentials, exchange ChatGPT subscriptions for API keys, or call private ChatGPT endpoints. Authentication, model access, quotas, Codex-native tools, MCP, and the Codex sandbox remain owned by the user-installed official CLI. DSH tools continue to execute inside the DSH host through its own policy pipeline.
 
 > Status: `0.1.0-beta.0`. Use a dedicated DSH profile and review the limitations below before relying on it for important work. This project is not endorsed by DeepSeek or OpenAI.
 
@@ -63,8 +63,8 @@ Configure the inserted `dsh-codex-app-server` row through the normal Cordis prof
 | --------------------------- | ---------------------------------- | -------------------------------------------------------------------- |
 | `command`                   | `codex` / `codex.cmd`              | Official Codex executable; Windows uses the npm `.cmd` shim          |
 | `args`                      | `[]`                               | Only `--strict-config`, `--enable=…`, and `--disable=…` are accepted |
-| `model`                     | Codex default                      | Optional model override                                              |
-| `reasoningEffort`           | Codex default                      | `minimal`, `low`, `medium`, `high`, or `xhigh`                       |
+| `model`                     | Codex account default              | Fallback before a DSH Codex model is selected                        |
+| `reasoningEffort`           | Selected model default             | Optional forward-compatible effort fallback                          |
 | `sandboxMode`               | `workspace-write`                  | `read-only`, `workspace-write`, or `danger-full-access`              |
 | `approvalPolicy`            | `on-request`                       | `untrusted`, `on-request`, or `never`                                |
 | `networkAccess`             | `false`                            | Per-turn sandbox network access                                      |
@@ -78,11 +78,19 @@ Configure the inserted `dsh-codex-app-server` row through the normal Cordis prof
 | `unknownNotificationPolicy` | `ignore`                           | `ignore` or fail the active turn with `fail-turn`                    |
 | `bindingRoot`               | `~/.dsh/codex-app-server-bindings` | Plugin-owned durable thread mapping directory                        |
 
+Installing this bundle makes the target DSH profile a dedicated Codex profile. Its composition disables the base Agent loop, ordinary DeepSeek/pi-ai LLM adapters, and the LLM-backed title generator without deleting their user settings; those providers remain available in other profiles. The remaining catalog-only `codex-app-server` provider populates the Web selector from the official App Server's paginated `model/list` response for the signed-in account, including each model's supported reasoning efforts. On first discovery, a stale non-Codex DSH default is replaced with Codex's advertised default. A foreign selection left on an existing session is rejected explicitly rather than silently executed as Codex. A Codex model and effort selected in DSH are snapshotted at each step and sent to `thread/start`, `thread/resume`, and `turn/start`; the catalog adapter never carries conversation traffic.
+
+Assistant text and reasoning deltas are appended to the DSH Session as they arrive. Codex execution items are retained as standard namespaced tool-call/result trajectories, including their complete started/completed payloads and reviewed intermediate updates. Plan snapshots drive DSH todo state, while plan explanations and turn diffs remain replayable Codex-provenance reasoning.
+
+Before connection and before each native turn, the provider assembles the exact agent-scoped DSH prompt, runtime context, and tool schemas. Prompt sections are supplied as App Server `developerInstructions`; they do not replace Codex base instructions. Tools are registered under the `dsh` dynamic-tool namespace. An `item/tool/call` request is executed by `ctx.tools.execute` with the unchanged Codex `callId`, agent scope, arguments, and turn cancellation signal, so DSH validation, guards, approval policy, skill/subagent implementations, Cordis tools, and result rendering remain authoritative. Changed prompt or tool snapshots force a bounded process reconnect and exact `thread/resume` before the next turn.
+
+Ownership is deliberately split. Codex owns its built-in tools, MCP/apps, native collaboration/delegation, Codex skills, rollout, and native history compaction. DSH owns `dsh.*` execution, DSH skills, subagents/workflows, Cordis dynamic packages, and their approval audit. The bundle replaces DSH `/compact` with `thread/compact/start`, because compacting only the projected DSH Session would not change the model-visible Codex rollout.
+
 User prompts never enter process argv. The default sandbox has no network access. Missing DSH approval or question providers produce a conservative decline/empty answer. Secret and explicitly nonblocking Codex questions also return no answer because DSH rc.6 has no matching safe interaction seam.
 
 ## Lifecycle and persistence
 
-Each live DSH Agent owns one Codex process and one non-ephemeral Codex thread. Creation is unpublished until setup, connection, and durable binding complete. Rollback reverses registry/session/process ownership. Resume requires DSH session persistence plus an exact plugin-owned `{session, thread, cwd fingerprint}` binding; a missing or mismatched binding fails instead of opening a context-free thread.
+Each live DSH Agent owns one Codex process and one non-ephemeral Codex thread. Creation is unpublished until setup, connection, and durable binding complete. Rollback reverses registry/session/process ownership. Resume requires DSH session persistence plus an exact plugin-owned `{session, thread, cwd fingerprint}` binding; a missing or mismatched binding fails instead of opening a context-free thread. Codex does not materialize a rollout until a thread reaches its first model step, so an explicitly reported missing rollout may be replaced only when the persisted DSH session has no lineage or seed and has never recorded `step/start`. This includes turns that failed before Codex received a request. Any session that reached a model step still fails closed.
 
 An active turn must continue producing correlated App Server activity. When it remains idle past `turnIdleTimeoutMs`, the driver requests an interrupt; if completion still does not arrive within `interruptGraceMs`, it closes the transport, terminates the process tree, and reconnects by resuming the exact durable thread on the next turn. Explicit interrupts use the same bounded recovery path. App Server warnings, deprecations, configuration warnings, model reroutes, and terminal turn errors are surfaced through the plugin logger with bounded secret redaction.
 
@@ -114,9 +122,11 @@ Uninstall this bundle with the DSH plugin removal command for the same profile. 
 
 ## Known limitations
 
-- DSH `0.1.0-rc.6` does not expose public downstream Session event registration. Codex command/file item detail therefore cannot yet be stored as honest plugin-owned DSH events or projected as native DSH tool calls. It remains in the native Codex thread; user input, reasoning, commentary/final text, usage, and approval audit use public standard DSH events. The public question service does not currently append an equivalent durable question audit pair.
 - User image blocks are supported when a DSH attachment store is installed: verified bytes are read by reference and sent as bounded data URLs. Text, reasoning, and images are accepted as input; tool-call and tool-result blocks are rejected instead of being mistranslated.
-- Codex tools are not DSH tools. This release deliberately does not pretend otherwise or inject DSH tool schemas into prompts.
+- App Server dynamic tools are experimental in Codex 0.147.0. A protocol upgrade must pass `pnpm protocol:check`, focused bridge tests, and the real smoke before release.
+- A Cordis package that adds prompt sections or tools during a running Codex turn becomes visible on the next native turn. App Server does not currently provide an in-turn dynamic-tool replacement operation.
+- DSH `additionalContexts` returned by a tool are included in that dynamic-tool response. A DSH `concludesTurn` marker is reported to Codex but cannot force the native turn to stop.
+- The public question service does not currently append a durable question audit pair.
 - MCP elicitation is declined because there is no complete DSH mapping yet.
 - One Agent permits only one active Codex turn. Native steering is serialized onto that turn.
 - Host versus remote-sandbox process placement must match where the user's Codex installation and login exist; this package currently owns a local host process.

@@ -2,8 +2,9 @@ import type { ResolvedConfig } from '../config.js'
 import { CodexAppServerError } from '../errors.js'
 import { packageVersion } from '../package.js'
 import type { CodexProcess } from '../process.js'
-import type { JsonRpcRequest, ThreadValue, TurnInput, TurnValue } from './protocol.js'
-import { parseInitializeResult, parseThreadResult, parseTurnStartResult } from './protocol.js'
+import type { CodexModelPage, JsonRpcRequest, ThreadValue, TurnInput, TurnValue } from './protocol.js'
+import type { CodexBridgeSnapshot } from '../bridge.js'
+import { parseInitializeResult, parseModelListResult, parseThreadResult, parseTurnStartResult } from './protocol.js'
 import { AppServerTransport } from './transport.js'
 import type { ActiveTurn, ProtocolDiagnostic, TurnCallbacks } from './notifications.js'
 import { requireActiveRoute, routeNotification } from './notifications.js'
@@ -18,6 +19,11 @@ export interface ThreadBinding {
   cwd: string
 }
 
+export interface CodexTurnSelection {
+  model: string
+  reasoningEffort?: string
+}
+
 export type ServerRequestHandler = (request: JsonRpcRequest) => Promise<unknown>
 
 export const SUPPORTED_SERVER_REQUEST_METHODS = [
@@ -26,6 +32,7 @@ export const SUPPORTED_SERVER_REQUEST_METHODS = [
   'item/tool/requestUserInput',
   'item/permissions/requestApproval',
   'mcpServer/elicitation/request',
+  'item/tool/call',
 ] as const
 
 const supportedServerRequests = new Set<string>(SUPPORTED_SERVER_REQUEST_METHODS)
@@ -62,7 +69,7 @@ export class AppServerClient {
       config.requestIdleTimeoutMs,
       {
         notification: (message) => this.receiveNotification(message.method, message.params),
-        request: (request) => this.onServerRequest(request),
+        request: (request) => routeServerRequest(this.activeTurn, this.handleServerRequest, request),
         protocolError: (error) => this.activeTurn?.completion.reject(error),
       },
       config.protocolMaxBytes,
@@ -77,7 +84,6 @@ export class AppServerClient {
     })
   }
 
-  /** Perform the mandatory initialize/initialized handshake. */
   async initialize(): Promise<{
     userAgent: string
     platformFamily: string
@@ -91,7 +97,7 @@ export class AppServerClient {
           title: 'DSH Codex App Server',
           version: packageVersion,
         },
-        capabilities: { experimentalApi: false },
+        capabilities: { experimentalApi: true },
       },
       this.config.startupTimeoutMs,
     )
@@ -100,48 +106,32 @@ export class AppServerClient {
     return result
   }
 
-  /** Start a persistent Codex thread in the validated DSH workspace. */
-  async startThread(cwd: string): Promise<ThreadBinding> {
-    if (this.binding !== undefined) throw new CodexAppServerError('PROTOCOL_INVALID', 'client already owns a thread')
-    const result = parseThreadResult(
-      await this.transport.request('thread/start', {
-        ...(this.config.model === undefined ? {} : { model: this.config.model }),
-        cwd,
-        approvalPolicy: this.config.approvalPolicy,
-        sandbox: this.config.sandboxMode,
-        ephemeral: false,
-      }),
-    )
-    assertWorkspace(cwd, result.cwd)
-    this.binding = result
-    return result
+  async listModels(cursor?: string): Promise<CodexModelPage> {
+    return requestModelPage(this.transport, this.config.startupTimeoutMs, cursor)
   }
 
-  /** Resume one exact persisted Codex thread; never creates a replacement. */
-  async resumeThread(threadId: string, cwd: string): Promise<ThreadBinding> {
+  async startThread(cwd: string, selection?: CodexTurnSelection, bridge?: CodexBridgeSnapshot): Promise<ThreadBinding> {
     if (this.binding !== undefined) throw new CodexAppServerError('PROTOCOL_INVALID', 'client already owns a thread')
-    const result = parseThreadResult(
-      await this.transport.request('thread/resume', {
-        threadId,
-        ...(this.config.model === undefined ? {} : { model: this.config.model }),
-        cwd,
-        approvalPolicy: this.config.approvalPolicy,
-        sandbox: this.config.sandboxMode,
-      }),
-    )
-    if (result.thread.id !== threadId) {
-      throw new CodexAppServerError(
-        'THREAD_MISMATCH',
-        `thread/resume returned ${result.thread.id} instead of ${threadId}`,
-      )
-    }
-    assertWorkspace(cwd, result.cwd)
-    this.binding = result
-    return result
+    this.binding = await requestThreadStart(this.transport, this.config, { cwd, selection, bridge })
+    return this.binding
   }
 
-  /** Run the sole active turn and settle only on its correlated completion notification. */
-  async startTurn(input: string | readonly TurnInput[], callbacks: TurnCallbacks = {}): Promise<TurnValue> {
+  async resumeThread(
+    threadId: string,
+    cwd: string,
+    selection?: CodexTurnSelection,
+    bridge?: CodexBridgeSnapshot,
+  ): Promise<ThreadBinding> {
+    if (this.binding !== undefined) throw new CodexAppServerError('PROTOCOL_INVALID', 'client already owns a thread')
+    this.binding = await requestThreadResume(this.transport, this.config, { threadId, cwd, selection, bridge })
+    return this.binding
+  }
+
+  async startTurn(
+    input: string | readonly TurnInput[],
+    callbacks: TurnCallbacks = {},
+    selection?: CodexTurnSelection,
+  ): Promise<TurnValue> {
     const binding = this.binding
     if (binding === undefined) throw new CodexAppServerError('PROTOCOL_INVALID', 'thread has not been started')
     if (this.activeTurn !== undefined) throw new CodexAppServerError('PROTOCOL_INVALID', 'a turn is already active')
@@ -161,8 +151,10 @@ export class AppServerClient {
           threadId: binding.thread.id,
           input: normalizeTurnInput(input),
           sandboxPolicy: turnSandboxPolicy(this.config, binding.cwd),
-          ...(this.config.model === undefined ? {} : { model: this.config.model }),
-          ...(this.config.reasoningEffort === undefined ? {} : { effort: this.config.reasoningEffort }),
+          ...modelParam(selection, this.config.model),
+          ...((selection === undefined ? this.config.reasoningEffort : selection.reasoningEffort) === undefined
+            ? {}
+            : { effort: selection === undefined ? this.config.reasoningEffort : selection.reasoningEffort }),
         }),
       )
       if (active.turnId !== undefined && active.turnId !== started.id) {
@@ -185,7 +177,37 @@ export class AppServerClient {
     }
   }
 
-  /** Interrupt the active correlated Codex turn. */
+  async compactThread(callbacks: TurnCallbacks = {}): Promise<TurnValue> {
+    const binding = this.binding
+    if (binding === undefined) throw new CodexAppServerError('PROTOCOL_INVALID', 'thread has not been started')
+    if (this.activeTurn !== undefined) throw new CodexAppServerError('PROTOCOL_INVALID', 'a turn is already active')
+    const completion = Promise.withResolvers<TurnValue>()
+    const active: ActiveTurn = {
+      threadId: binding.thread.id,
+      callbacks,
+      completion,
+      turnReady: Promise.withResolvers<void>(),
+      activity: () => this.touchTurn(active),
+    }
+    this.activeTurn = active
+    this.interruptPending = false
+    try {
+      await this.transport.request('thread/compact/start', { threadId: binding.thread.id })
+      this.watchdog.touch(() => {
+        void this.forceTurnFailure(
+          active,
+          new CodexAppServerError('TURN_IDLE_TIMEOUT', 'Codex compaction did not start before the turn idle deadline'),
+        )
+      })
+      return await completion.promise
+    } finally {
+      this.watchdog.clear()
+      active.turnReady.resolve()
+      this.interruptPending = false
+      if (this.activeTurn === active) this.activeTurn = undefined
+    }
+  }
+
   async interrupt(): Promise<void> {
     const active = this.activeTurn
     if (active === undefined) return
@@ -211,7 +233,6 @@ export class AppServerClient {
     )
   }
 
-  /** Add model-visible input to the active turn at App Server's native steer boundary. */
   async steer(input: string | readonly TurnInput[]): Promise<void> {
     const active = this.activeTurn
     if (active === undefined) throw new CodexAppServerError('PROTOCOL_INVALID', 'no active turn to steer')
@@ -226,10 +247,7 @@ export class AppServerClient {
     })
   }
 
-  /** Reject protocol work before the process owner terminates the child. */
-  close(): void {
-    this.transport.close()
-  }
+  close = (): void => this.transport.close()
 
   private receiveNotification(method: string, params: unknown): void {
     const active = this.activeTurn
@@ -279,9 +297,80 @@ export class AppServerClient {
     this.transport.close(error)
     await this.process.dispose().catch(() => {})
   }
+}
 
-  private async onServerRequest(request: JsonRpcRequest): Promise<unknown> {
-    return routeServerRequest(this.activeTurn, this.handleServerRequest, request)
+async function requestModelPage(
+  transport: AppServerTransport,
+  timeoutMs: number,
+  cursor?: string,
+): Promise<CodexModelPage> {
+  return parseModelListResult(await transport.request('model/list', cursor === undefined ? {} : { cursor }, timeoutMs))
+}
+
+async function requestThreadStart(
+  transport: AppServerTransport,
+  config: ResolvedConfig,
+  request: ThreadStartRequest,
+): Promise<ThreadBinding> {
+  const result = parseThreadResult(
+    await transport.request('thread/start', {
+      ...modelParam(request.selection, config.model),
+      cwd: request.cwd,
+      approvalPolicy: config.approvalPolicy,
+      sandbox: config.sandboxMode,
+      ephemeral: false,
+      ...bridgeParams(request.bridge),
+    }),
+  )
+  assertWorkspace(request.cwd, result.cwd)
+  return result
+}
+
+async function requestThreadResume(
+  transport: AppServerTransport,
+  config: ResolvedConfig,
+  request: ThreadResumeRequest,
+): Promise<ThreadBinding> {
+  const result = parseThreadResult(
+    await transport.request('thread/resume', {
+      threadId: request.threadId,
+      ...modelParam(request.selection, config.model),
+      cwd: request.cwd,
+      approvalPolicy: config.approvalPolicy,
+      sandbox: config.sandboxMode,
+      ...bridgeParams(request.bridge),
+    }),
+  )
+  if (result.thread.id !== request.threadId) {
+    throw new CodexAppServerError(
+      'THREAD_MISMATCH',
+      `thread/resume returned ${result.thread.id} instead of ${request.threadId}`,
+    )
+  }
+  assertWorkspace(request.cwd, result.cwd)
+  return result
+}
+
+interface ThreadStartRequest {
+  cwd: string
+  selection: CodexTurnSelection | undefined
+  bridge: CodexBridgeSnapshot | undefined
+}
+
+interface ThreadResumeRequest extends ThreadStartRequest {
+  threadId: string
+}
+
+function modelParam(selection: CodexTurnSelection | undefined, configured: string | undefined): { model?: string } {
+  const model = selection?.model ?? configured
+  return model === undefined ? {} : { model }
+}
+
+function bridgeParams(bridge: CodexBridgeSnapshot | undefined): Record<string, unknown> {
+  if (bridge === undefined) return {}
+  return {
+    developerInstructions: bridge.developerInstructions,
+    dynamicTools: bridge.dynamicTools,
   }
 }
 

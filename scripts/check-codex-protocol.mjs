@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
-import { stdout } from 'node:process'
+import { env, platform, stdout } from 'node:process'
 import { spawn } from 'node:child_process'
 
 const EXPECTED_CODEX_VERSION = 'codex-cli 0.147.0'
@@ -19,7 +19,12 @@ const EXPECTED_METHOD_HASHES = {
  */
 function run(command, args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true })
+    const spec = commandSpec(command, args)
+    const child = spawn(spec.command, spec.args, {
+      stdio: ['ignore', 'pipe', 'inherit'],
+      windowsHide: true,
+      ...spec.options,
+    })
     let stdout = ''
     child.stdout.setEncoding('utf8')
     child.stdout.on('data', (chunk) => {
@@ -31,6 +36,23 @@ function run(command, args) {
       else reject(new Error(`${command} ${args.join(' ')} exited with ${String(code)}`))
     })
   })
+}
+
+/** @param {string} command @param {readonly string[]} args */
+function commandSpec(command, args) {
+  if (platform !== 'win32') return { command, args, options: {} }
+  const commandLine = [`${command}.cmd`, ...args].map(quoteCmdToken).join(' ')
+  return {
+    command: env['ComSpec'] ?? 'cmd.exe',
+    args: ['/d', '/s', '/v:off', '/c', `"${commandLine}"`],
+    options: { windowsVerbatimArguments: true },
+  }
+}
+
+/** @param {string} value */
+function quoteCmdToken(value) {
+  if (/[\0\r\n"%]/u.test(value)) throw new Error('Codex protocol-check arguments contain unsafe cmd.exe syntax')
+  return `"${value}"`
 }
 
 /**
@@ -66,9 +88,9 @@ async function generatedFiles(root, directory = root) {
 async function generatedContractHash(root) {
   const hash = createHash('sha256')
   for (const file of (await generatedFiles(root)).sort()) {
-    hash.update(relative(root, file))
+    hash.update(relative(root, file).replaceAll('\\', '/'))
     hash.update('\0')
-    hash.update(await readFile(file))
+    hash.update((await readFile(file, 'utf8')).replaceAll('\r\n', '\n'))
     hash.update('\0')
   }
   return hash.digest('hex')

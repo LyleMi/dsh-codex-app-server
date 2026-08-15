@@ -4,7 +4,7 @@
 
 这是一个实验性的 DeepSeek Harness 插件包。它通过 `codex app-server --stdio` 启动官方 Codex CLI，并将其作为 DSH 的 `AgentFactory` 使用。
 
-本插件不会读取 Codex 凭据、把 ChatGPT 订阅换成 API Key，也不会调用 ChatGPT 私有接口。身份验证、模型权限、配额、工具、MCP 与沙箱执行均由用户安装的 Codex CLI 管理。
+本插件不会读取 Codex 凭据、把 ChatGPT 订阅换成 API Key，也不会调用 ChatGPT 私有接口。身份验证、模型权限、配额、Codex 原生工具、MCP 与 Codex 沙箱均由用户安装的官方 CLI 管理；DSH 工具仍在 DSH host 内通过其自身策略链执行。
 
 > 当前版本为 `0.1.0-beta.0`。请先在独立的 DSH profile 中试用，并阅读下方限制。本项目不受 DeepSeek 或 OpenAI 官方认可或背书。
 
@@ -58,8 +58,8 @@ npx --yes @deepseek-ai/dsh@0.1.0-rc.6 --profile web --dump-config
 | --------------------------- | ---------------------------------- | ---------------------------------------------------------- |
 | `command`                   | `codex` / `codex.cmd`              | 官方 Codex 可执行文件；Windows 自动使用 npm 的 `.cmd` shim |
 | `args`                      | `[]`                               | 仅允许 `--strict-config`、`--enable=…` 和 `--disable=…`    |
-| `model`                     | Codex 默认值                       | 可选模型覆盖                                               |
-| `reasoningEffort`           | Codex 默认值                       | `minimal`、`low`、`medium`、`high` 或 `xhigh`              |
+| `model`                     | Codex 账户默认值                   | DSH 尚未选择 Codex 模型时的后备值                          |
+| `reasoningEffort`           | 所选模型默认值                     | 可选、向前兼容的 effort 后备值                             |
 | `sandboxMode`               | `workspace-write`                  | `read-only`、`workspace-write` 或 `danger-full-access`     |
 | `approvalPolicy`            | `on-request`                       | `untrusted`、`on-request` 或 `never`                       |
 | `networkAccess`             | `false`                            | 每个 turn 的沙箱网络访问权限                               |
@@ -73,11 +73,19 @@ npx --yes @deepseek-ai/dsh@0.1.0-rc.6 --profile web --dump-config
 | `unknownNotificationPolicy` | `ignore`                           | `ignore`，或用 `fail-turn` 使当前 turn 失败                |
 | `bindingRoot`               | `~/.dsh/codex-app-server-bindings` | 插件持久化线程映射的目录                                   |
 
+安装该 bundle 会把目标 DSH profile 变成 Codex 专用 profile。组合补丁会禁用基础 Agent loop、普通 DeepSeek/pi-ai LLM adapter 和依赖 LLM 的标题生成器，但不会删除用户设置；这些 provider 在未安装本 bundle 的其他 profile 中仍然可用。profile 中保留的 `codex-app-server` provider 只提供目录，DSH Web 模型选择器的数据来自官方 App Server 针对当前登录账户返回的分页 `model/list`，并包含各模型支持的 reasoning effort。首次发现目录时，如果 DSH 默认值仍是遗留的非 Codex provider，会改为 Codex 声明的默认模型。已有 session 若仍保留 foreign provider 选择，会明确拒绝，而不会静默按 Codex 执行。在 DSH 中选定的 Codex 模型与 effort 会在每个 step 快照，并传给 `thread/start`、`thread/resume` 和 `turn/start`；目录 adapter 本身不承载对话流量。
+
+Assistant 文本与 reasoning delta 会在到达时立即追加到 DSH Session。Codex 执行 item 会投影为标准的、带命名空间的 tool-call/result 轨迹，并保留完整 started/completed payload 与已审核的中间更新。Plan 快照会驱动 DSH todo 状态，plan explanation 与 turn diff 则保留为可回放的 Codex provenance reasoning。
+
+连接前及每个原生 turn 前，provider 会组装当前 agent scope 的 DSH prompt、运行时 context 与工具 schema。Prompt section 通过 App Server `developerInstructions` 注入，不覆盖 Codex base instructions；工具统一注册到 `dsh` 动态工具 namespace。收到 `item/tool/call` 后，桥会用未改写的 Codex `callId`、agent scope、arguments 和 turn 取消信号调用 `ctx.tools.execute`，因此 DSH 参数校验、guard、审批策略、skill/subagent、Cordis 工具和结果渲染仍是权威实现。Prompt 或工具快照变化时，会在下一 turn 前有界重启进程并精确 `thread/resume`。
+
+所有权刻意分层：Codex 拥有内建工具、MCP/apps、原生 collaboration/delegation、Codex skills、rollout 与原生历史压缩；DSH 拥有 `dsh.*` 执行、DSH skills、subagents/workflows、Cordis 动态包及其审批审计。Bundle 会用 `thread/compact/start` 替换 DSH `/compact`，因为只压缩投影出来的 DSH Session 并不会改变模型实际读取的 Codex rollout。
+
 用户 prompt 不会进入进程 argv。默认沙箱不允许联网。缺少 DSH 审批或提问 provider 时会保守拒绝或返回空答案。由于 DSH rc.6 尚无匹配的安全交互接口，secret 与明确标记为非阻塞的 Codex 问题也不会被回答。
 
 ## 生命周期与持久化
 
-每个活跃 DSH Agent 拥有一个 Codex 进程和一个非临时 Codex thread。只有 setup、连接和持久化 binding 全部完成后才会发布实例；失败时会逆序回滚 registry、session 与进程所有权。恢复 session 需要 DSH session 持久化，以及完全匹配的 `{session, thread, cwd fingerprint}` binding；缺失或不匹配时不会创建一个丢失上下文的新 thread。
+每个活跃 DSH Agent 拥有一个 Codex 进程和一个非临时 Codex thread。只有 setup、连接和持久化 binding 全部完成后才会发布实例；失败时会逆序回滚 registry、session 与进程所有权。恢复 session 需要 DSH session 持久化，以及完全匹配的 `{session, thread, cwd fingerprint}` binding；缺失或不匹配时不会创建一个丢失上下文的新 thread。Codex 要到首个 model step 才会落盘 rollout，因此仅当 App Server 明确报告 rollout 不存在，且持久化 DSH session 没有 lineage 或 seed、从未记录 `step/start` 时，插件才会新建 thread 并替换 binding。这包括在 Codex 收到请求前就失败的 turn；任何已进入 model step 的 session 仍然 fail closed。
 
 活跃 turn 必须持续产生相关 App Server 活动。超过 `turnIdleTimeoutMs` 后，driver 会请求中断；若在 `interruptGraceMs` 内仍未结束，它会关闭 transport、终止进程树，并在下一 turn 精确恢复原 thread。显式中断使用同一套有界恢复流程。
 
@@ -99,9 +107,11 @@ RUN_REAL_CODEX=1 pnpm test:e2e
 
 ## 已知限制
 
-- DSH `0.1.0-rc.6` 尚未公开下游 Session event 注册接口，所以 Codex 命令/文件 item 的细节无法保存成原生 DSH tool call；这些内容仍保留在 Codex thread 中。
 - 安装 DSH attachment store 后支持用户图片；文本、reasoning 和图片可以作为输入，tool-call 与 tool-result block 会被拒绝，避免错误翻译语义。
-- Codex 工具不是 DSH 工具，本版本不会伪装这一点，也不会把 DSH tool schema 注入 prompt。
+- Codex 0.147.0 中 App Server dynamic tools 仍属 experimental；升级协议后必须重新执行协议检查、桥接测试与真实 smoke。
+- Cordis 动态包如果在一个 Codex turn 运行期间新增 prompt section 或工具，要到下一个原生 turn 才会可见；App Server 当前没有 turn 内替换 dynamic tools 的操作。
+- DSH 工具返回的 `additionalContexts` 会放入该 dynamic-tool response；`concludesTurn` 会告知 Codex，但无法强制原生 turn 立即停止。
+- DSH question service 当前仍不会追加持久的提问审计事件对。
 - MCP elicitation 暂不支持。
 - 每个 Agent 同时只允许一个活跃 Codex turn，原生 steering 会串行进入该 turn。
 - DSH 与 Codex 必须在同一主机执行环境中，且该环境能访问用户的 Codex 安装和登录状态。

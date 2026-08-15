@@ -3,6 +3,28 @@
 - id: agent-loop
   disabled: true
 
+# This bundle owns the complete Agent runtime rather than an LLM stream route.
+# Keep the profile's model catalog Codex-only so session.selectModel cannot
+# advertise a provider that the installed AgentFactory is unable to execute.
+# User provider settings remain untouched and are still available to profiles
+# that do not install this bundle.
+- id: llm-deepseek
+  disabled: true
+
+- id: llm-pi-ai
+  disabled: true
+
+# The LLM-backed title generator would otherwise dispatch through the
+# catalog-only Codex adapter. The deterministic first-prompt fallback remains.
+- id: session-title-llm
+  disabled: true
+
+# DSH surface compaction cannot change the Codex rollout that owns model
+# history. The provider below registers a same-name command backed by
+# thread/compact/start instead.
+- id: command-compact
+  disabled: true
+
 - insert:
     - id: dsh-codex-app-server
       name: dsh-codex-app-server

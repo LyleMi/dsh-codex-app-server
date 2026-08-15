@@ -16,6 +16,7 @@ import { CodexAgent } from './agent.js'
 import type { CodexConnectionLauncher } from './agent.js'
 import { ThreadBindingStore, workspaceFingerprint } from './bindings.js'
 import type { ResolvedConfig } from './config.js'
+import { CodexAppServerError } from './errors.js'
 
 interface PreparedLifecycle {
   agent: CodexAgent
@@ -33,6 +34,8 @@ interface SetupTransaction {
   callerSignal?: AbortSignal
   source: SessionStartSource
 }
+
+type BindingRollback = () => Promise<void>
 
 /** Public AgentFactory implementation and structural owner of every Codex child. */
 export class CodexAgentFactory implements AgentFactory {
@@ -131,12 +134,12 @@ export class CodexAgentFactory implements AgentFactory {
     ])
     const commit = await raceAbort(setup?.(lifecycle.agent.ctx), signal)
     commit?.commit()
-    const wroteBinding = await raceAbort(this.connectThread(lifecycle.agent, preparation, id, source), signal)
+    const rollbackBinding = await raceAbort(this.connectThread(lifecycle.agent, preparation, id, source), signal)
     try {
       signal.throwIfAborted()
       return lifecycle.publish(source)
     } catch (error: unknown) {
-      if (wroteBinding) await this.bindings.remove(id)
+      await rollbackBinding?.()
       throw error
     }
   }
@@ -146,13 +149,33 @@ export class CodexAgentFactory implements AgentFactory {
     preparation: SessionPreparation,
     id: SessionId,
     source: SessionStartSource,
-  ): Promise<boolean> {
+  ): Promise<BindingRollback | undefined> {
     const cwd = preparation.session.header.cwd ?? process.cwd()
-    if (source === 'resume') {
-      const durable = await this.bindings.read(id, cwd)
+    if (source === 'resume') return this.resumeThread(agent, preparation, id, cwd)
+    await this.startAndBindThread(agent, id, cwd)
+    return () => this.bindings.remove(id)
+  }
+
+  private async resumeThread(
+    agent: CodexAgent,
+    preparation: SessionPreparation,
+    id: SessionId,
+    cwd: string,
+  ): Promise<BindingRollback | undefined> {
+    const durable = await this.bindings.read(id, cwd)
+    try {
       await agent.connect(durable.threadId)
-      return false
+      return undefined
+    } catch (error: unknown) {
+      if (!isMissingUnmaterializedThread(error, durable.threadId) || !hasNoMaterializedTurn(preparation.session)) {
+        throw error
+      }
     }
+    await this.startAndBindThread(agent, id, cwd)
+    return () => this.bindings.write(durable)
+  }
+
+  private async startAndBindThread(agent: CodexAgent, id: SessionId, cwd: string): Promise<void> {
     const binding = await agent.connect()
     await this.bindings.write({
       version: 1,
@@ -162,7 +185,6 @@ export class CodexAgentFactory implements AgentFactory {
       cliVersion: binding.thread.cliVersion,
       ephemeral: false,
     })
-    return true
   }
 
   private prepare(
@@ -250,6 +272,26 @@ export class CodexAgentFactory implements AgentFactory {
     if (this.claimedIds.has(id)) throw new Error(`agent ${id} is already being created or is active`)
     this.claimedIds.add(id)
   }
+}
+
+function isMissingUnmaterializedThread(error: unknown, threadId: string): boolean {
+  return (
+    error instanceof CodexAppServerError &&
+    error.code === 'PROTOCOL_INVALID' &&
+    error.message === `App Server error -32600: no rollout found for thread id ${threadId}`
+  )
+}
+
+function hasNoMaterializedTurn(session: SessionPreparation['session']): boolean {
+  const { header } = session
+  if (
+    header.parentSession !== undefined ||
+    (header.seedLength !== undefined && header.seedLength !== 0) ||
+    (header.delegationDepth !== undefined && header.delegationDepth !== 0)
+  ) {
+    return false
+  }
+  return !session.events.some((event) => event.type === 'step/start')
 }
 
 async function raceAbort<T>(operation: PromiseLike<T> | T, signal: AbortSignal): Promise<T> {

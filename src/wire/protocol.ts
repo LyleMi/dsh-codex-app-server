@@ -58,6 +58,28 @@ export interface ThreadValue {
   cliVersion: string
 }
 
+export interface CodexReasoningEffort {
+  reasoningEffort: string
+  description: string
+}
+
+export interface CodexModelInfo {
+  id: string
+  model: string
+  displayName: string
+  description: string
+  hidden: boolean
+  supportedReasoningEfforts: CodexReasoningEffort[]
+  defaultReasoningEffort?: string
+  inputModalities: Array<'text' | 'image'>
+  isDefault: boolean
+}
+
+export interface CodexModelPage {
+  data: CodexModelInfo[]
+  nextCursor: string | null
+}
+
 function record(value: unknown, context: string): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new CodexAppServerError('PROTOCOL_INVALID', `${context} must be an object`)
@@ -69,6 +91,15 @@ function stringField(value: Record<string, unknown>, key: string, context: strin
   const field = value[key]
   if (typeof field !== 'string' || field.length === 0) {
     throw new CodexAppServerError('PROTOCOL_INVALID', `${context}.${key} must be a non-empty string`)
+  }
+  return field
+}
+
+function optionalStringField(value: Record<string, unknown>, key: string, context: string): string | undefined {
+  const field = value[key]
+  if (field === undefined || field === null) return undefined
+  if (typeof field !== 'string' || field.length === 0) {
+    throw new CodexAppServerError('PROTOCOL_INVALID', `${context}.${key} must be a non-empty string when present`)
   }
   return field
 }
@@ -117,6 +148,62 @@ export function parseInitializeResult(value: unknown): {
     userAgent: stringField(result, 'userAgent', 'initialize result'),
     platformFamily: stringField(result, 'platformFamily', 'initialize result'),
     platformOs: stringField(result, 'platformOs', 'initialize result'),
+  }
+}
+
+/** Validate one stable model/list page while ignoring additive model metadata. */
+export function parseModelListResult(value: unknown): CodexModelPage {
+  const result = record(value, 'model/list result')
+  if (!Array.isArray(result['data'])) {
+    throw new CodexAppServerError('PROTOCOL_INVALID', 'model/list result.data must be an array')
+  }
+  const nextCursor = result['nextCursor']
+  if (nextCursor !== null && nextCursor !== undefined && typeof nextCursor !== 'string') {
+    throw new CodexAppServerError('PROTOCOL_INVALID', 'model/list result.nextCursor must be a string or null')
+  }
+  return {
+    data: result['data'].map((item, index) => parseModelInfo(item, `model/list result.data[${index}]`)),
+    nextCursor: nextCursor ?? null,
+  }
+}
+
+function parseModelInfo(value: unknown, context: string): CodexModelInfo {
+  const model = record(value, context)
+  const efforts = model['supportedReasoningEfforts']
+  const modalities = model['inputModalities']
+  const defaultReasoningEffort = optionalStringField(model, 'defaultReasoningEffort', context)
+  if (!Array.isArray(efforts)) {
+    throw new CodexAppServerError('PROTOCOL_INVALID', `${context}.supportedReasoningEfforts must be an array`)
+  }
+  if (!Array.isArray(modalities)) {
+    throw new CodexAppServerError('PROTOCOL_INVALID', `${context}.inputModalities contains an unsupported modality`)
+  }
+  const inputModalities: Array<'text' | 'image'> = []
+  for (const modality of modalities as unknown[]) {
+    if (modality !== 'text' && modality !== 'image') {
+      throw new CodexAppServerError('PROTOCOL_INVALID', `${context}.inputModalities contains an unsupported modality`)
+    }
+    inputModalities.push(modality)
+  }
+  if (typeof model['hidden'] !== 'boolean' || typeof model['isDefault'] !== 'boolean') {
+    throw new CodexAppServerError('PROTOCOL_INVALID', `${context} visibility/default fields must be booleans`)
+  }
+  return {
+    id: stringField(model, 'id', context),
+    model: stringField(model, 'model', context),
+    displayName: stringField(model, 'displayName', context),
+    description: stringField(model, 'description', context),
+    hidden: model['hidden'],
+    supportedReasoningEfforts: efforts.map((item, index) => {
+      const effort = record(item, `${context}.supportedReasoningEfforts[${index}]`)
+      return {
+        reasoningEffort: stringField(effort, 'reasoningEffort', `${context}.supportedReasoningEfforts[${index}]`),
+        description: stringField(effort, 'description', `${context}.supportedReasoningEfforts[${index}]`),
+      }
+    }),
+    ...(defaultReasoningEffort === undefined ? {} : { defaultReasoningEffort }),
+    inputModalities,
+    isDefault: model['isDefault'],
   }
 }
 

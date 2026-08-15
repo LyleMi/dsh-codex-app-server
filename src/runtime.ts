@@ -1,19 +1,29 @@
-import type { AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { ResolvedConfig } from './config.js'
 import { CodexAppServerError } from './errors.js'
 import { CodexProcess } from './process.js'
-import type { ServerRequestHandler, ThreadBinding, TurnCallbacks } from './wire/client.js'
+import type { CodexTurnSelection, ServerRequestHandler, ThreadBinding, TurnCallbacks } from './wire/client.js'
 import { AppServerClient } from './wire/client.js'
 import type { ProtocolDiagnostic } from './wire/notifications.js'
 import type { JsonRpcRequest, TurnInput, TurnValue } from './wire/protocol.js'
+import type { CodexBridgeSnapshot } from './bridge.js'
 
 export interface CodexConnection {
   process: { dispose(): Promise<void> }
   client: {
     initialize(): Promise<unknown>
-    startThread(cwd: string): Promise<ThreadBinding>
-    resumeThread(threadId: string, cwd: string): Promise<ThreadBinding>
-    startTurn(input: readonly TurnInput[], callbacks?: TurnCallbacks): Promise<TurnValue>
+    startThread(cwd: string, selection?: CodexTurnSelection, bridge?: CodexBridgeSnapshot): Promise<ThreadBinding>
+    resumeThread(
+      threadId: string,
+      cwd: string,
+      selection?: CodexTurnSelection,
+      bridge?: CodexBridgeSnapshot,
+    ): Promise<ThreadBinding>
+    startTurn(
+      input: readonly TurnInput[],
+      callbacks?: TurnCallbacks,
+      selection?: CodexTurnSelection,
+    ): Promise<TurnValue>
+    compactThread(callbacks?: TurnCallbacks): Promise<TurnValue>
     steer(input: readonly TurnInput[]): Promise<void>
     interrupt(): Promise<void>
     close(): void
@@ -38,6 +48,8 @@ export class CodexRuntime {
   private connection: CodexConnection | undefined
   private thread: ThreadBinding | undefined
   private pendingSeed: string | undefined
+  private selection: CodexTurnSelection | undefined
+  private bridge: CodexBridgeSnapshot | undefined
   private readonly launcher: CodexConnectionLauncher
   private readonly serverRequestHandler: ServerRequestHandler
   private readonly protocolDiagnostic: (value: ProtocolDiagnostic) => void
@@ -45,7 +57,6 @@ export class CodexRuntime {
   constructor(
     private readonly config: ResolvedConfig,
     private readonly cwd: string,
-    private readonly options: AgentOptions,
     hooks: CodexRuntimeHooks = {},
   ) {
     this.launcher = hooks.launcher ?? defaultConnectionLauncher
@@ -58,15 +69,22 @@ export class CodexRuntime {
     return this.thread
   }
 
-  async connect(resumeThreadId?: string, seedContext?: string): Promise<ThreadBinding> {
+  async connect(
+    resumeThreadId?: string,
+    seedContext?: string,
+    selection?: CodexTurnSelection,
+    bridge?: CodexBridgeSnapshot,
+  ): Promise<ThreadBinding> {
     if (this.connection !== undefined) throw new Error('Codex runtime is already connected')
     const connection = (this.connection = this.launch())
     try {
       await connection.client.initialize()
+      this.selection = selection
+      this.bridge = bridge
       this.thread =
         resumeThreadId === undefined
-          ? await connection.client.startThread(this.cwd)
-          : await connection.client.resumeThread(resumeThreadId, this.cwd)
+          ? await connection.client.startThread(this.cwd, selection, bridge)
+          : await connection.client.resumeThread(resumeThreadId, this.cwd, selection, bridge)
       if (resumeThreadId === undefined) this.pendingSeed = seedContext
       return this.thread
     } catch (error: unknown) {
@@ -75,16 +93,25 @@ export class CodexRuntime {
     }
   }
 
-  async startTurn(input: readonly TurnInput[], callbacks: TurnCallbacks): Promise<TurnValue> {
+  async startTurn(
+    input: readonly TurnInput[],
+    callbacks: TurnCallbacks,
+    selection?: CodexTurnSelection,
+    bridge?: CodexBridgeSnapshot,
+  ): Promise<TurnValue> {
     const seed = this.pendingSeed
     this.pendingSeed = undefined
     const prompt: readonly TurnInput[] =
       seed === undefined
         ? input
         : [{ type: 'text', text: `${seed}\n\nCurrent user input:`, text_elements: [] }, ...input]
+    await this.refreshBridge(bridge)
     const connection = await this.ensureConnection()
+    this.selection = selection
     try {
-      return await connection.client.startTurn(prompt, callbacks)
+      return selection === undefined
+        ? await connection.client.startTurn(prompt, callbacks)
+        : await connection.client.startTurn(prompt, callbacks, selection)
     } catch (error: unknown) {
       if (
         error instanceof CodexAppServerError &&
@@ -104,9 +131,29 @@ export class CodexRuntime {
     return this.connection?.client.interrupt() ?? Promise.resolve()
   }
 
+  async compact(signal: AbortSignal): Promise<TurnValue> {
+    const connection = await this.ensureConnection()
+    const interrupt = (): void => {
+      void connection.client.interrupt().catch(() => {})
+    }
+    signal.addEventListener('abort', interrupt, { once: true })
+    try {
+      signal.throwIfAborted()
+      return await connection.client.compactThread()
+    } finally {
+      signal.removeEventListener('abort', interrupt)
+    }
+  }
+
   async shutdown(): Promise<void> {
     if (this.connection === undefined) return
     await this.resetConnection(this.connection)
+  }
+
+  private async refreshBridge(bridge: CodexBridgeSnapshot | undefined): Promise<void> {
+    if (bridge?.fingerprint === this.bridge?.fingerprint) return
+    if (this.connection !== undefined) await this.resetConnection(this.connection)
+    this.bridge = bridge
   }
 
   private requireConnection(): CodexConnection {
@@ -121,7 +168,7 @@ export class CodexRuntime {
     const connection = (this.connection = this.launch())
     try {
       await connection.client.initialize()
-      this.thread = await connection.client.resumeThread(thread.thread.id, this.cwd)
+      this.thread = await connection.client.resumeThread(thread.thread.id, this.cwd, this.selection, this.bridge)
       return connection
     } catch (error: unknown) {
       await this.resetConnection(connection)
@@ -130,11 +177,7 @@ export class CodexRuntime {
   }
 
   private launch(): CodexConnection {
-    const effectiveConfig: ResolvedConfig = {
-      ...this.config,
-      ...(this.options.model === undefined ? {} : { model: this.options.model }),
-    }
-    return this.launcher(effectiveConfig, this.cwd, this.serverRequestHandler, this.protocolDiagnostic)
+    return this.launcher(this.config, this.cwd, this.serverRequestHandler, this.protocolDiagnostic)
   }
 
   private async resetConnection(connection: CodexConnection): Promise<void> {

@@ -37,7 +37,10 @@ class ProtocolPeer {
   }
 }
 
-function fixture(config = resolveConfig()): {
+function fixture(
+  config = resolveConfig(),
+  handler = vi.fn(() => Promise.resolve({})),
+): {
   client: AppServerClient
   server: PassThrough
   peer: ProtocolPeer
@@ -56,7 +59,7 @@ function fixture(config = resolveConfig()): {
   return {
     server,
     peer: new ProtocolPeer(fromClient),
-    client: new AppServerClient(process, config, vi.fn()),
+    client: new AppServerClient(process, config, handler),
     dispose,
   }
 }
@@ -64,6 +67,7 @@ function fixture(config = resolveConfig()): {
 async function connect(client: AppServerClient, server: PassThrough, peer: ProtocolPeer): Promise<void> {
   const initializing = client.initialize()
   const initialize = await peer.next()
+  expect(initialize).toMatchObject({ params: { capabilities: { experimentalApi: true } } })
   server.write(
     `${JSON.stringify({
       id: initialize['id'],
@@ -95,6 +99,125 @@ async function connect(client: AppServerClient, server: PassThrough, peer: Proto
 }
 
 describe('AppServerClient protocol fixture', () => {
+  it('waits for native thread compaction lifecycle after the immediate request response', async () => {
+    const { client, server, peer } = fixture()
+    await connect(client, server, peer)
+    const compacting = client.compactThread()
+    const request = await peer.next()
+    expect(request).toMatchObject({ method: 'thread/compact/start', params: { threadId: 'thread-1' } })
+    server.write(`${JSON.stringify({ id: request['id'], result: {} })}\n`)
+    server.write(
+      `${JSON.stringify({ method: 'turn/started', params: { threadId: 'thread-1', turn: turn('turn-compact') } })}\n`,
+    )
+    server.write(
+      `${JSON.stringify({ method: 'turn/completed', params: { threadId: 'thread-1', turn: turn('turn-compact') } })}\n`,
+    )
+    await expect(compacting).resolves.toMatchObject({ id: 'turn-compact', status: 'completed' })
+    client.close()
+  })
+
+  it('routes Codex dynamic tool requests to the client executor and returns its result', async () => {
+    const handler = vi.fn(() =>
+      Promise.resolve({ contentItems: [{ type: 'inputText', text: 'from DSH' }], success: true }),
+    )
+    const { client, server, peer } = fixture(resolveConfig(), handler)
+    await connect(client, server, peer)
+    const running = client.startTurn('use DSH')
+    const start = await peer.next()
+    server.write(`${JSON.stringify({ id: start['id'], result: { turn: turn('turn-dsh') } })}\n`)
+    server.write(
+      `${JSON.stringify({
+        id: 77,
+        method: 'item/tool/call',
+        params: {
+          threadId: 'thread-1',
+          turnId: 'turn-dsh',
+          callId: 'call-dsh',
+          namespace: 'dsh',
+          tool: 'echo',
+          arguments: { text: 'hello' },
+        },
+      })}\n`,
+    )
+    await expect(peer.next()).resolves.toMatchObject({
+      id: 77,
+      result: { contentItems: [{ type: 'inputText', text: 'from DSH' }], success: true },
+    })
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ method: 'item/tool/call' }))
+    server.write(
+      `${JSON.stringify({ method: 'turn/completed', params: { threadId: 'thread-1', turn: turn('turn-dsh') } })}\n`,
+    )
+    await expect(running).resolves.toMatchObject({ id: 'turn-dsh' })
+    client.close()
+  })
+
+  it('lists account models and forwards a per-turn Codex selection', async () => {
+    const { client, server, peer } = fixture()
+    const initializing = client.initialize()
+    const initialize = await peer.next()
+    server.write(
+      `${JSON.stringify({
+        id: initialize['id'],
+        result: { userAgent: 'codex/0.147.0', platformFamily: 'unix', platformOs: 'linux' },
+      })}\n`,
+    )
+    await initializing
+    await peer.next()
+    const listing = client.listModels()
+    const list = await peer.next()
+    expect(list).toMatchObject({ method: 'model/list', params: {} })
+    server.write(
+      `${JSON.stringify({
+        id: list['id'],
+        result: {
+          data: [
+            {
+              id: 'gpt-5.6-sol',
+              model: 'gpt-5.6-sol',
+              displayName: 'GPT-5.6-Sol',
+              description: 'Frontier coding model',
+              hidden: false,
+              supportedReasoningEfforts: [{ reasoningEffort: 'ultra', description: 'Delegated reasoning' }],
+              defaultReasoningEffort: 'low',
+              inputModalities: ['text', 'image'],
+              isDefault: true,
+            },
+          ],
+          nextCursor: null,
+        },
+      })}\n`,
+    )
+    await expect(listing).resolves.toMatchObject({ data: [{ model: 'gpt-5.6-sol' }] })
+
+    const starting = client.startThread('/workspace', { model: 'gpt-5.6-sol' })
+    const start = await peer.next()
+    expect(start).toMatchObject({ method: 'thread/start', params: { model: 'gpt-5.6-sol' } })
+    server.write(
+      `${JSON.stringify({
+        id: start['id'],
+        result: {
+          thread: { id: 'thread-1', ephemeral: false, cliVersion: '0.147.0' },
+          model: 'gpt-5.6-sol',
+          modelProvider: 'openai',
+          cwd: '/workspace',
+        },
+      })}\n`,
+    )
+    await starting
+    const running = client.startTurn('hello', {}, { model: 'gpt-5.6-terra', reasoningEffort: 'ultra' })
+    const turnStart = await peer.next()
+    expect(turnStart).toMatchObject({
+      method: 'turn/start',
+      params: { model: 'gpt-5.6-terra', effort: 'ultra' },
+    })
+    server.write(`${JSON.stringify({ id: turnStart['id'], result: { turn: turn('turn-selected') } })}\n`)
+    server.write(
+      `${JSON.stringify({ method: 'turn/completed', params: { threadId: 'thread-1', turn: turn('turn-selected') } })}\n`,
+    )
+    await expect(running).resolves.toMatchObject({ id: 'turn-selected' })
+    client.close()
+  })
+
   it('supports omitted jsonrpc, early notifications, two turns, and cross-thread isolation', async () => {
     const { client, server, peer } = fixture()
     await connect(client, server, peer)
@@ -139,6 +262,51 @@ describe('AppServerClient protocol fixture', () => {
       )
       await expect(running).resolves.toMatchObject({ id: turnId, status: 'completed' })
     }
+    client.close()
+  })
+
+  it('routes live item deltas and reviewed turn-state events before completion', async () => {
+    const { client, server, peer } = fixture()
+    await connect(client, server, peer)
+    const callbacks = {
+      itemStarted: vi.fn(),
+      agentMessageDelta: vi.fn(),
+      reasoningDelta: vi.fn(),
+      commandOutputDelta: vi.fn(),
+      turnEvent: vi.fn(),
+    }
+    const running = client.startTurn('stream', callbacks)
+    const start = await peer.next()
+    server.write(
+      `${JSON.stringify({ method: 'turn/started', params: { threadId: 'thread-1', turn: turn('turn-stream') } })}\n`,
+    )
+    server.write(`${JSON.stringify({ id: start['id'], result: { turn: turn('turn-stream') } })}\n`)
+    const route = { threadId: 'thread-1', turnId: 'turn-stream' }
+    server.write(
+      `${JSON.stringify({ method: 'item/started', params: { ...route, item: { type: 'agentMessage', id: 'm', text: '', phase: 'final_answer' } } })}\n`,
+    )
+    server.write(
+      `${JSON.stringify({ method: 'item/agentMessage/delta', params: { ...route, itemId: 'm', delta: 'hi' } })}\n`,
+    )
+    server.write(
+      `${JSON.stringify({ method: 'item/reasoning/textDelta', params: { ...route, itemId: 'r', delta: 'why', contentIndex: 0 } })}\n`,
+    )
+    server.write(
+      `${JSON.stringify({ method: 'item/commandExecution/outputDelta', params: { ...route, itemId: 'c', delta: 'out' } })}\n`,
+    )
+    const plan = { ...route, explanation: 'doing it', plan: [{ step: 'work', status: 'inProgress' }] }
+    server.write(`${JSON.stringify({ method: 'turn/plan/updated', params: plan })}\n`)
+
+    expect(callbacks.itemStarted).toHaveBeenCalledOnce()
+    expect(callbacks.agentMessageDelta).toHaveBeenCalledWith('m', 'hi')
+    expect(callbacks.reasoningDelta).toHaveBeenCalledWith('r', 'why', 'content')
+    expect(callbacks.commandOutputDelta).toHaveBeenCalledWith('c', 'out')
+    expect(callbacks.turnEvent).toHaveBeenCalledWith('turn/plan/updated', plan)
+
+    server.write(
+      `${JSON.stringify({ method: 'turn/completed', params: { threadId: 'thread-1', turn: turn('turn-stream') } })}\n`,
+    )
+    await expect(running).resolves.toMatchObject({ id: 'turn-stream' })
     client.close()
   })
 

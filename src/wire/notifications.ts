@@ -9,6 +9,7 @@ export interface TurnCallbacks {
   agentMessageDelta?(itemId: string, delta: string): void
   reasoningDelta?(itemId: string, delta: string, kind: 'summary' | 'content'): void
   commandOutputDelta?(itemId: string, delta: string): void
+  turnEvent?(method: string, params: unknown): void
   usage?(value: unknown): void
   unknownNotification?(method: string, params: unknown): void
 }
@@ -157,9 +158,23 @@ function routeDiagnostic(
   }
 }
 
+const observedTurnMethods = new Set([
+  'turn/diff/updated',
+  'turn/plan/updated',
+  'item/plan/delta',
+  'item/reasoning/summaryPartAdded',
+  'item/commandExecution/terminalInteraction',
+  'item/fileChange/outputDelta',
+  'item/fileChange/patchUpdated',
+  'item/mcpToolCall/progress',
+  'item/autoApprovalReview/started',
+  'item/autoApprovalReview/completed',
+])
+
 function routeObservedTurnState(active: ActiveTurn | undefined, method: string, params: unknown): boolean {
-  if (method !== 'turn/diff/updated' && method !== 'turn/plan/updated') return false
-  if (active !== undefined) requireActiveRoute(active, params)
+  if (!observedTurnMethods.has(method)) return false
+  const matched = active === undefined ? undefined : requireActiveRoute(active, params)
+  if (matched !== undefined) matched.callbacks.turnEvent?.(method, params)
   return true
 }
 

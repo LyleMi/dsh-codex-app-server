@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseJsonRpc, parseThreadResult, parseTurn } from '../src/wire/protocol.js'
+import { parseJsonRpc, parseModelListResult, parseThreadResult, parseTurn } from '../src/wire/protocol.js'
 
 describe('protocol validation', () => {
   it('preserves extension fields on known envelopes and items', () => {
@@ -36,5 +36,29 @@ describe('protocol validation', () => {
       cwd: '/workspace',
     })
     expect(() => parseThreadResult({ thread: {}, cwd: '/workspace' })).toThrow(/thread result\.thread\.id/)
+  })
+
+  it('validates Codex model capabilities used by the DSH selector', () => {
+    expect(
+      parseModelListResult({
+        data: [
+          {
+            id: 'gpt-5.6-sol',
+            model: 'gpt-5.6-sol',
+            displayName: 'GPT-5.6-Sol',
+            description: 'Frontier coding model',
+            hidden: false,
+            supportedReasoningEfforts: [{ reasoningEffort: 'ultra', description: 'Delegated reasoning' }],
+            defaultReasoningEffort: 'low',
+            inputModalities: ['text', 'image'],
+            isDefault: true,
+          },
+        ],
+        nextCursor: 'next',
+      }),
+    ).toMatchObject({
+      data: [{ model: 'gpt-5.6-sol', defaultReasoningEffort: 'low', inputModalities: ['text', 'image'] }],
+      nextCursor: 'next',
+    })
   })
 })

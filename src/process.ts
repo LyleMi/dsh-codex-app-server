@@ -53,12 +53,20 @@ export function buildSpawnSpec(config: ResolvedConfig, cwd: string, platform = p
     }
   }
   const commandInterpreter = process.env['ComSpec'] ?? 'cmd.exe'
-  const escapedCommand = `"${config.command.replaceAll('"', '""')}"`
+  const commandLine = [config.command, ...appArgs].map(quoteCmdToken).join(' ')
   return {
     command: commandInterpreter,
-    args: ['/d', '/s', '/c', escapedCommand, ...appArgs],
-    options: { cwd, env, windowsHide: true },
+    args: ['/d', '/s', '/v:off', '/c', `"${commandLine}"`],
+    options: { cwd, env, windowsHide: true, windowsVerbatimArguments: true },
   }
+}
+
+/** Quote one trusted argv token for a verbatim cmd.exe /c command line. */
+function quoteCmdToken(value: string): string {
+  if (/[\0\r\n"%]/u.test(value)) {
+    throw new CodexAppServerError('CONFIG_INVALID', 'Windows Codex command arguments contain unsafe cmd.exe syntax')
+  }
+  return `"${value}"`
 }
 
 /** Resolve an executable through PATH for early load/start diagnostics. */

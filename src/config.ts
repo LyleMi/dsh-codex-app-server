@@ -9,7 +9,7 @@ export interface Config {
   command?: string
   args?: readonly string[]
   model?: string
-  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+  reasoningEffort?: string
   sandboxMode?: SandboxMode
   approvalPolicy?: ApprovalPolicy
   networkAccess?: boolean
@@ -64,6 +64,12 @@ export function resolveConfig(config: Config = {}, platform = process.platform):
   const command = config.command ?? defaultCodexCommand(platform)
   if (command.trim() === '') throw new CodexAppServerError('CONFIG_INVALID', 'command must not be empty')
   const args = config.args ?? []
+  if (config.model !== undefined && config.model.trim() === '') {
+    throw new CodexAppServerError('CONFIG_INVALID', 'model must not be empty')
+  }
+  if (config.reasoningEffort !== undefined && config.reasoningEffort.trim() === '') {
+    throw new CodexAppServerError('CONFIG_INVALID', 'reasoningEffort must not be empty')
+  }
   for (const arg of args) {
     if (!ALLOWED_ARGS.has(arg) && !arg.startsWith('--enable=') && !arg.startsWith('--disable=')) {
       throw new CodexAppServerError(

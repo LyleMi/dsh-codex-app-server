@@ -4,13 +4,19 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import AttachmentStore, { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentLimits } from '@deepseek-ai/dsh-attachment'
-import AgentRegistry from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { installModelSelection } from '@deepseek-ai/dsh-agent'
+import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, SessionPreparation } from '@deepseek-ai/dsh-session'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { CodexConnectionLauncher } from '../src/agent.js'
+import type { CodexConnection, CodexConnectionLauncher } from '../src/agent.js'
+import { ThreadBindingStore } from '../src/bindings.js'
 import { resolveConfig } from '../src/config.js'
+import type { Config } from '../src/config.js'
 import { CodexAppServerError } from '../src/errors.js'
 import { CodexAgentFactory } from '../src/factory.js'
 import type { TurnInput } from '../src/wire/protocol.js'
@@ -53,6 +59,8 @@ afterEach(async () => {
 async function harness(): Promise<{ ctx: Context; bindingRoot: string }> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
+  await ctx.plugin(SystemPrompt, {})
+  await ctx.plugin(ToolRuntime, {})
   await ctx.plugin(AgentRegistry)
   const bindingRoot = await mkdtemp(join(tmpdir(), 'dsh-codex-bindings-'))
   temporaryRoots.push(bindingRoot)
@@ -63,12 +71,13 @@ async function installFactory(
   ctx: Context,
   bindingRoot: string,
   launcher: CodexConnectionLauncher,
+  config: Config = {},
 ): Promise<CodexAgentFactory> {
   let factory: CodexAgentFactory | undefined
   await ctx.plugin(
     Object.assign(
       (pluginCtx: Context) => {
-        factory = new CodexAgentFactory(pluginCtx, resolveConfig({ bindingRoot }), launcher)
+        factory = new CodexAgentFactory(pluginCtx, resolveConfig({ ...config, bindingRoot }), launcher)
         pluginCtx.agents.setFactory(factory)
       },
       { inject: ['agents', 'sessions'] },
@@ -107,6 +116,7 @@ function mockLauncher(dispose = vi.fn()): CodexConnectionLauncher {
         })
         return Promise.resolve({ id: 'codex-turn-1', status: 'completed', items: [item], error: null })
       },
+      compactThread: () => Promise.resolve({ id: 'codex-compact-1', status: 'completed', items: [], error: null }),
       steer: () => Promise.resolve(),
       interrupt: () => Promise.resolve(),
       close: () => {},
@@ -115,6 +125,134 @@ function mockLauncher(dispose = vi.fn()): CodexConnectionLauncher {
 }
 
 describe('Codex AgentFactory and Agent', () => {
+  it('applies the live Codex model and reasoning selection to thread and turn requests', async () => {
+    const { ctx, bindingRoot } = await harness()
+    const base = mockLauncher()
+    const sample = base(resolveConfig(), process.cwd(), vi.fn())
+    const startThread = vi.fn(sample.client.startThread.bind(sample.client))
+    const startTurn = vi.fn(sample.client.startTurn.bind(sample.client))
+    const launcher: CodexConnectionLauncher = (config, cwd, handler) => {
+      const connection = base(config, cwd, handler)
+      connection.client.startThread = startThread
+      connection.client.startTurn = startTurn
+      return connection
+    }
+    const selection: ModelSelectionRef = {
+      current: {
+        provider: 'codex-app-server',
+        model: 'gpt-5.6-sol',
+        reasoningEffort: ReasoningEffortId('low'),
+      },
+      assembled: undefined,
+    }
+    const factory = await installFactory(ctx, bindingRoot, launcher)
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('codex-model-selection'),
+      setup: (agentCtx) => {
+        agentCtx.effect(() => installModelSelection(agentCtx, selection))
+      },
+    })
+    expect(startThread).toHaveBeenCalledWith(
+      expect.any(String),
+      { model: 'gpt-5.6-sol', reasoningEffort: 'low' },
+      expect.any(Object),
+    )
+    expect(startThread.mock.calls[0]?.[2]?.developerInstructions).toContain('DeepSeek Harness')
+
+    selection.current = {
+      provider: 'codex-app-server',
+      model: 'gpt-5.6-terra',
+      reasoningEffort: ReasoningEffortId('ultra'),
+    }
+    handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } }))
+    await handle.agent.whenIdle()
+    expect(startTurn).toHaveBeenCalledWith(expect.any(Array), expect.any(Object), {
+      model: 'gpt-5.6-terra',
+      reasoningEffort: 'ultra',
+    })
+    await handle.dispose()
+    await factory.dispose()
+  })
+
+  it('ignores the DSH default model unless the plugin explicitly configures one', async () => {
+    const { ctx, bindingRoot } = await harness()
+    const launchedModels: Array<string | undefined> = []
+    const base = mockLauncher()
+    const launcher: CodexConnectionLauncher = (config, cwd, handler) => {
+      launchedModels.push(config.model)
+      return base(config, cwd, handler)
+    }
+    const factory = await installFactory(ctx, bindingRoot, launcher)
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('dsh-model-isolation'),
+      agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-flash-202605' },
+    })
+
+    expect(launchedModels[0]).toBeUndefined()
+    expect(handle.agent.options).toEqual({ provider: 'codex-app-server' })
+    await handle.dispose()
+    await factory.dispose()
+
+    const configured = await harness()
+    const configuredModels: Array<string | undefined> = []
+    const configuredLauncher: CodexConnectionLauncher = (config, cwd, handler) => {
+      configuredModels.push(config.model)
+      return base(config, cwd, handler)
+    }
+    const configuredFactory = await installFactory(configured.ctx, configured.bindingRoot, configuredLauncher, {
+      model: 'gpt-5.4',
+    })
+    const configuredHandle = await configured.ctx.agents.create({
+      sessionId: SessionId('configured-codex-model'),
+      agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-flash-202605' },
+    })
+
+    expect(configuredModels[0]).toBe('gpt-5.4')
+    expect(configuredHandle.agent.options).toEqual({ provider: 'codex-app-server', model: 'gpt-5.4' })
+    await configuredHandle.dispose()
+    await configuredFactory.dispose()
+  })
+
+  it('refuses a foreign session selection instead of silently running it as Codex', async () => {
+    const { ctx, bindingRoot } = await harness()
+    const base = mockLauncher()
+    const sample = base(resolveConfig(), process.cwd(), vi.fn())
+    const startTurn = vi.fn(sample.client.startTurn.bind(sample.client))
+    const launcher: CodexConnectionLauncher = (config, cwd, handler) => {
+      const connection = base(config, cwd, handler)
+      connection.client.startTurn = startTurn
+      return connection
+    }
+    const selection: ModelSelectionRef = {
+      current: { provider: 'tokenhub', model: 'legacy-model' },
+      assembled: undefined,
+    }
+    const factory = await installFactory(ctx, bindingRoot, launcher)
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('foreign-provider-selection'),
+      setup: (agentCtx) => {
+        agentCtx.effect(() => installModelSelection(agentCtx, selection))
+      },
+    })
+
+    handle.agent.followup(
+      createUserMessage({ content: [{ type: 'text', text: 'use Codex' }], source: { kind: 'user' } }),
+    )
+    await handle.agent.whenIdle()
+
+    expect(startTurn).not.toHaveBeenCalled()
+    expect(handle.agent.session.events.findLast((event) => event.type === 'turn/end')?.data.reason).toEqual({
+      kind: 'error',
+      error: {
+        code: 'CODEX_ERROR',
+        message:
+          'Codex-only profile cannot route provider "tokenhub"; select a "codex-app-server" model for this session',
+      },
+    })
+    await handle.dispose()
+    await factory.dispose()
+  })
+
   it('publishes in order, logs a complete turn, and tears down ownership', async () => {
     const { ctx, bindingRoot } = await harness()
     const workspace = await mkdtemp(join(tmpdir(), 'dsh-codex-workspace-'))
@@ -225,7 +363,7 @@ describe('Codex AgentFactory and Agent', () => {
     const { ctx, bindingRoot } = await harness()
     const workspace = await mkdtemp(join(tmpdir(), 'dsh-codex-resume-'))
     temporaryRoots.push(workspace)
-    const resumeThread = vi.fn((threadId: string) =>
+    const resumeThread = vi.fn<CodexConnection['client']['resumeThread']>((threadId: string) =>
       Promise.resolve({
         thread: { id: threadId, ephemeral: false, cwd: workspace, cliVersion: '0.147.0' },
         model: 'gpt-5',
@@ -256,8 +394,178 @@ describe('Codex AgentFactory and Agent', () => {
         ),
     } as never)
     const resumed = await ctx.agents.resume({ resumeSessionId: id })
-    expect(resumeThread).toHaveBeenCalledWith('codex-thread-1', workspace)
+    expect(resumeThread).toHaveBeenCalledWith('codex-thread-1', workspace, undefined, expect.any(Object))
+    expect(resumeThread.mock.calls[0]?.[3]?.developerInstructions).toContain('DeepSeek Harness')
     await resumed.dispose()
+    await factory.dispose()
+  })
+
+  it('replaces an unmaterialized Codex thread only for a blank persisted session', async () => {
+    const { ctx, bindingRoot } = await harness()
+    const startThread = vi.fn((cwd: string) => {
+      const threadNumber = startThread.mock.calls.length
+      return Promise.resolve({
+        thread: { id: `codex-thread-${threadNumber}`, ephemeral: false, cwd, cliVersion: '0.147.0' },
+        model: 'gpt-5',
+        modelProvider: 'openai',
+        cwd,
+      })
+    })
+    const resumeThread = vi.fn<CodexConnection['client']['resumeThread']>((threadId: string) =>
+      Promise.reject(
+        new CodexAppServerError(
+          'PROTOCOL_INVALID',
+          `App Server error -32600: no rollout found for thread id ${threadId}`,
+        ),
+      ),
+    )
+    const base = mockLauncher()
+    const launcher: CodexConnectionLauncher = (config, cwd, handler) => {
+      const connection = base(config, cwd, handler)
+      connection.client.startThread = startThread
+      connection.client.resumeThread = resumeThread
+      return connection
+    }
+    const factory = await installFactory(ctx, bindingRoot, launcher)
+    const id = SessionId('blank-unmaterialized-thread')
+    const first = await ctx.agents.create({ sessionId: id })
+    const snapshot: { meta: SessionHeader; events: SessionEvent[] } = {
+      meta: structuredClone(first.agent.session.header),
+      events: structuredClone(first.agent.session.events) as SessionEvent[],
+    }
+    await first.dispose()
+    ctx.provide('sessionPersistence', {
+      prepare: () =>
+        Promise.resolve(
+          SessionPreparation.create(
+            ctx.sessions.prepare(id, { seed: snapshot.events, meta: snapshot.meta, seedSource: 'persistence' }),
+          ),
+        ),
+    } as never)
+
+    const resumed = await ctx.agents.resume({ resumeSessionId: id })
+
+    expect(resumeThread).toHaveBeenCalledWith('codex-thread-1', expect.any(String), undefined, expect.any(Object))
+    expect(resumeThread.mock.calls[0]?.[3]?.developerInstructions).toContain('DeepSeek Harness')
+    expect(startThread).toHaveBeenCalledTimes(2)
+    await expect(new ThreadBindingStore(bindingRoot).read(id, process.cwd())).resolves.toMatchObject({
+      threadId: 'codex-thread-2',
+    })
+    await resumed.dispose()
+    await factory.dispose()
+  })
+
+  it('replaces an unmaterialized thread after a request fails before the first model step', async () => {
+    const { ctx, bindingRoot } = await harness()
+    let starts = 0
+    const base = mockLauncher()
+    const launcher: CodexConnectionLauncher = (config, cwd, handler) => {
+      const connection = base(config, cwd, handler)
+      connection.client.startThread = () => {
+        starts += 1
+        return Promise.resolve({
+          thread: { id: `codex-thread-${starts}`, ephemeral: false, cwd, cliVersion: '0.147.0' },
+          model: 'gpt-5',
+          modelProvider: 'openai',
+          cwd,
+        })
+      }
+      connection.client.resumeThread = (threadId) =>
+        Promise.reject(
+          new CodexAppServerError(
+            'PROTOCOL_INVALID',
+            `App Server error -32600: no rollout found for thread id ${threadId}`,
+          ),
+        )
+      return connection
+    }
+    const factory = await installFactory(ctx, bindingRoot, launcher)
+    const id = SessionId('failed-before-first-step')
+    const first = await ctx.agents.create({
+      sessionId: id,
+      setup: (agentCtx) => {
+        agentCtx.on('agent/request', async (payload, next) => {
+          if (payload.turn > 0) throw new Error('selection failed before model request')
+          return next()
+        })
+      },
+    })
+    first.agent.followup(
+      createUserMessage({ content: [{ type: 'text', text: 'never reached Codex' }], source: { kind: 'user' } }),
+    )
+    await first.agent.whenIdle()
+    expect(first.agent.session.events.some((event) => event.type === 'step/start')).toBe(false)
+    const snapshot: { meta: SessionHeader; events: SessionEvent[] } = {
+      meta: structuredClone(first.agent.session.header),
+      events: structuredClone(first.agent.session.events) as SessionEvent[],
+    }
+    await first.dispose()
+    ctx.provide('sessionPersistence', {
+      prepare: () =>
+        Promise.resolve(
+          SessionPreparation.create(
+            ctx.sessions.prepare(id, { seed: snapshot.events, meta: snapshot.meta, seedSource: 'persistence' }),
+          ),
+        ),
+    } as never)
+
+    const resumed = await ctx.agents.resume({ resumeSessionId: id })
+
+    expect(starts).toBe(2)
+    await expect(new ThreadBindingStore(bindingRoot).read(id, process.cwd())).resolves.toMatchObject({
+      threadId: 'codex-thread-2',
+    })
+    await resumed.dispose()
+    await factory.dispose()
+  })
+
+  it('does not replace a missing Codex rollout when persisted session content exists', async () => {
+    const { ctx, bindingRoot } = await harness()
+    let starts = 0
+    const base = mockLauncher()
+    const launcher: CodexConnectionLauncher = (config, cwd, handler) => {
+      const connection = base(config, cwd, handler)
+      connection.client.startThread = () => {
+        starts += 1
+        return Promise.resolve({
+          thread: { id: 'codex-thread-1', ephemeral: false, cwd, cliVersion: '0.147.0' },
+          model: 'gpt-5',
+          modelProvider: 'openai',
+          cwd,
+        })
+      }
+      connection.client.resumeThread = (threadId) =>
+        Promise.reject(
+          new CodexAppServerError(
+            'PROTOCOL_INVALID',
+            `App Server error -32600: no rollout found for thread id ${threadId}`,
+          ),
+        )
+      return connection
+    }
+    const factory = await installFactory(ctx, bindingRoot, launcher)
+    const id = SessionId('nonblank-missing-thread')
+    const first = await ctx.agents.create({ sessionId: id })
+    first.agent.followup(
+      createUserMessage({ content: [{ type: 'text', text: 'persist me' }], source: { kind: 'user' } }),
+    )
+    await first.agent.whenIdle()
+    const snapshot: { meta: SessionHeader; events: SessionEvent[] } = {
+      meta: structuredClone(first.agent.session.header),
+      events: structuredClone(first.agent.session.events) as SessionEvent[],
+    }
+    await first.dispose()
+    ctx.provide('sessionPersistence', {
+      prepare: () =>
+        Promise.resolve(
+          SessionPreparation.create(
+            ctx.sessions.prepare(id, { seed: snapshot.events, meta: snapshot.meta, seedSource: 'persistence' }),
+          ),
+        ),
+    } as never)
+
+    await expect(ctx.agents.resume({ resumeSessionId: id })).rejects.toThrow('no rollout found')
+    expect(starts).toBe(1)
     await factory.dispose()
   })
 

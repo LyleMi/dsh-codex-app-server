@@ -36,4 +36,32 @@ describe('ThreadBindingStore', () => {
       await rm(root, { recursive: true, force: true })
     }
   })
+
+  it('atomically replaces an existing binding', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'binding-store-'))
+    const store = new ThreadBindingStore(root)
+    const sessionId = SessionId('replace-binding')
+    try {
+      await store.write({
+        version: 1,
+        sessionId,
+        threadId: 'thread-1',
+        cwdFingerprint: workspaceFingerprint('/workspace'),
+        cliVersion: '0.147.0',
+        ephemeral: false,
+      })
+      await store.write({
+        version: 1,
+        sessionId,
+        threadId: 'thread-2',
+        cwdFingerprint: workspaceFingerprint('/workspace'),
+        cliVersion: '0.147.0',
+        ephemeral: false,
+      })
+
+      await expect(store.read(sessionId, '/workspace')).resolves.toMatchObject({ threadId: 'thread-2' })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 })
