@@ -8,12 +8,6 @@
 
 > 当前版本为 `0.1.0-beta.0`。请先在独立的 DSH profile 中试用，并阅读下方限制。本项目不受 DeepSeek 或 OpenAI 官方认可或背书。
 
-## 与 dsh-codex 的区别
-
-`dsh-codex` 是 LLM 适配器：DSH 保留自己的 agent loop，只把模型请求交给该适配器。本项目则是完整的 agent driver：bundle patch 会禁用 `agent-loop`，安装一个由 Codex 驱动的 `AgentFactory`，线程、turn、内置工具、沙箱和审批请求都由 Codex App Server 负责。
-
-不要把两者作为同一层的替代实现同时安装。
-
 ## 兼容性
 
 | 组件                | 已验证基线                   | 兼容策略                              |
@@ -36,14 +30,14 @@ DSH CLI 的完整 npm 包名是 `@deepseek-ai/dsh`。npm 上不带 scope 的 `ds
 使用 `npx` 一次性运行：
 
 ```sh
-npx --yes --package=@deepseek-ai/dsh@0.1.0-rc.6 --package=pnpm@10.15.0 -- dsh plugin --profile web add dsh-codex-app-server
+npx --yes --package=@deepseek-ai/dsh@0.1.0-rc.6 -- dsh plugin --profile web add dsh-codex-app-server
 npx --yes @deepseek-ai/dsh@0.1.0-rc.6 web
 ```
 
 或者通过 npm 全局安装：
 
 ```sh
-npm install --global @deepseek-ai/dsh@0.1.0-rc.6 pnpm@10.15.0
+npm install --global @deepseek-ai/dsh@0.1.0-rc.6
 dsh plugin --profile web add dsh-codex-app-server
 dsh web
 ```

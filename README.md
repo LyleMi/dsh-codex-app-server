@@ -8,12 +8,6 @@ This package does not read Codex credentials, exchange ChatGPT subscriptions for
 
 > Status: `0.1.0-beta.0`. Use a dedicated DSH profile and review the limitations below before relying on it for important work. This project is not endorsed by DeepSeek or OpenAI.
 
-## How it differs from `dsh-codex`
-
-`dsh-codex` is an LLM adapter: DSH keeps its default agent loop and sends model requests through that adapter. This package is a complete agent driver: its bundle patch disables the `agent-loop` row and installs one Codex-backed `AgentFactory`; Codex App Server owns threads, turns, built-in tools, sandboxing, and approval requests.
-
-Do not install both as alternative implementations of the same layer.
-
 ## Compatibility
 
 | Component                 | Verified baseline                | Policy                                                          |
@@ -36,14 +30,14 @@ The DSH CLI package is `@deepseek-ai/dsh`; the unscoped npm package named `dsh` 
 One-off `npx`:
 
 ```sh
-npx --yes --package=@deepseek-ai/dsh@0.1.0-rc.6 --package=pnpm@10.15.0 -- dsh plugin --profile web add dsh-codex-app-server
+npx --yes --package=@deepseek-ai/dsh@0.1.0-rc.6 -- dsh plugin --profile web add dsh-codex-app-server
 npx --yes @deepseek-ai/dsh@0.1.0-rc.6 web
 ```
 
 Global npm installation:
 
 ```sh
-npm install --global @deepseek-ai/dsh@0.1.0-rc.6 pnpm@10.15.0
+npm install --global @deepseek-ai/dsh@0.1.0-rc.6
 dsh plugin --profile web add dsh-codex-app-server
 dsh web
 ```
@@ -55,7 +49,7 @@ Local development installation:
 ```sh
 pnpm install
 pnpm build
-npx --yes --package=@deepseek-ai/dsh@0.1.0-rc.6 --package=pnpm@10.15.0 -- dsh plugin --profile web add link:/absolute/path/to/dsh-codex-app-server
+npx --yes --package=@deepseek-ai/dsh@0.1.0-rc.6 -- dsh plugin --profile web add link:/absolute/path/to/dsh-codex-app-server
 npx --yes @deepseek-ai/dsh@0.1.0-rc.6 --profile web --dump-config
 ```
 
