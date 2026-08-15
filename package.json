@@ -22,7 +22,7 @@
   "engines": {
     "node": ">=22.19.0"
   },
-  "packageManager": "npm@10.9.8",
+  "packageManager": "pnpm@10.15.0",
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",
     "access": "public",
@@ -57,9 +57,9 @@
     "lint": "eslint .",
     "reforge": "reforge config validate . && node scripts/check-reforge.mjs",
     "format:check": "prettier --check .",
-    "pack:check": "npm pack --dry-run",
-    "prepublishOnly": "npm run check",
-    "check": "npm run format:check && npm run lint && npm run reforge && npm run typecheck && npm run test:coverage && npm run build && npm run pack:check"
+    "pack:check": "node scripts/check-package.mjs",
+    "prepublishOnly": "pnpm check",
+    "check": "pnpm format:check && pnpm lint && pnpm reforge && pnpm typecheck && pnpm test:coverage && pnpm build && pnpm pack:check"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

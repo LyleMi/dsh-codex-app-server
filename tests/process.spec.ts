@@ -12,7 +12,14 @@ describe('process argv', () => {
   })
 
   it('uses a fixed cmd.exe tuple for codex.cmd on Windows', () => {
-    const spec = buildSpawnSpec(resolveConfig({ command: 'C:\\tools\\codex.cmd' }), 'C:\\workspace', 'win32')
+    const spec = buildSpawnSpec(resolveConfig({}, 'win32'), 'C:\\workspace', 'win32')
+    expect(spec.command).toBe(process.env['ComSpec'] ?? 'cmd.exe')
+    expect(spec.args).toEqual(['/d', '/s', '/c', '"codex.cmd"', 'app-server', '--stdio'])
+    expect(spec.options).not.toHaveProperty('shell')
+  })
+
+  it('accepts an absolute Windows command override', () => {
+    const spec = buildSpawnSpec(resolveConfig({ command: 'C:\\tools\\codex.cmd' }, 'win32'), 'C:\\workspace', 'win32')
     expect(spec.args).toEqual(['/d', '/s', '/c', '"C:\\tools\\codex.cmd"', 'app-server', '--stdio'])
     expect(spec.options).not.toHaveProperty('shell')
   })

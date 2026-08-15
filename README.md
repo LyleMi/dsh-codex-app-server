@@ -1,5 +1,7 @@
 # dsh-codex-app-server
 
+[简体中文](README.zh-CN.md)
+
 Experimental DeepSeek Harness bundle that runs the official Codex CLI as the DSH `AgentFactory` through `codex app-server --stdio`.
 
 This package does not read Codex credentials, exchange ChatGPT subscriptions for API keys, or call private ChatGPT endpoints. Authentication, model access, quotas, tools, MCP, and sandbox execution remain owned by the user-installed Codex CLI.
@@ -20,26 +22,41 @@ Do not install both as alternative implementations of the same layer.
 | DeepSeek Harness packages | `0.1.0-rc.6`                     | peer range `^0.1.0-rc.6`                                        |
 | Cordis                    | `4.0.1`                          | peer range `^4.0.1`                                             |
 | Codex CLI                 | `0.147.0`                        | handshake and protocol fixtures are tested against this version |
+| Reforge                   | `0.2.0`                          | CI verifies the pinned source revision reports this version     |
 | Platforms                 | Ubuntu, Windows protocol/argv CI | real local smoke verified on Ubuntu                             |
 
 App Server is still evolving. Unknown server requests fail closed. A Codex upgrade can therefore stop a turn instead of silently accepting changed semantics.
 
 ## Prerequisites and install
 
-Install and sign in to the official Codex CLI first. Confirm that `codex` works in the same host execution world as DSH. The plugin never opens or copies `~/.codex/auth.json`.
+Install and sign in to the official Codex CLI first. Confirm that `codex` (`codex.cmd` on Windows) works in the same host execution world as DSH. The plugin never opens or copies `~/.codex/auth.json`.
 
-Registry installation:
+The DSH CLI package is `@deepseek-ai/dsh`; the unscoped npm package named `dsh` is unrelated. To install the plugin and launch the web profile directly from the registry without cloning or building this repository, use either of the following options.
+
+One-off `npx`:
 
 ```sh
-dsh plugin --profile web add dsh-codex-app-server
-dsh --profile web --dump-config
+npx --yes --package=@deepseek-ai/dsh@0.1.0-rc.6 --package=pnpm@10.15.0 -- dsh plugin --profile web add dsh-codex-app-server
+npx --yes @deepseek-ai/dsh@0.1.0-rc.6 web
 ```
+
+Global npm installation:
+
+```sh
+npm install --global @deepseek-ai/dsh@0.1.0-rc.6 pnpm@10.15.0
+dsh plugin --profile web add dsh-codex-app-server
+dsh web
+```
+
+The profile is persisted under the normal DSH home directory, so later launches do not reinstall the plugin. To inspect the composed configuration, replace `web` in the launch command with `--profile web --dump-config`.
 
 Local development installation:
 
 ```sh
-dsh plugin --profile web add link:/absolute/path/to/dsh-codex-app-server
-dsh --profile web --dump-config
+pnpm install
+pnpm build
+npx --yes --package=@deepseek-ai/dsh@0.1.0-rc.6 --package=pnpm@10.15.0 -- dsh plugin --profile web add link:/absolute/path/to/dsh-codex-app-server
+npx --yes @deepseek-ai/dsh@0.1.0-rc.6 --profile web --dump-config
 ```
 
 The resulting configuration must show `agent-loop` disabled and one enabled `dsh-codex-app-server` row. The patch preserves the profile's session persistence, UI, ACP/JSON-RPC, filesystem, subprocess, permission, and sandbox providers.
@@ -50,7 +67,7 @@ Configure the inserted `dsh-codex-app-server` row through the normal Cordis prof
 
 | Field                       | Default                            | Meaning                                                              |
 | --------------------------- | ---------------------------------- | -------------------------------------------------------------------- |
-| `command`                   | `codex`                            | Official Codex executable                                            |
+| `command`                   | `codex` / `codex.cmd`              | Official Codex executable; Windows uses the npm `.cmd` shim          |
 | `args`                      | `[]`                               | Only `--strict-config`, `--enable=…`, and `--disable=…` are accepted |
 | `model`                     | Codex default                      | Optional model override                                              |
 | `reasoningEffort`           | Codex default                      | `minimal`, `low`, `medium`, `high`, or `xhigh`                       |
@@ -80,16 +97,17 @@ A DSH fork always starts a new Codex thread. Its first turn receives at most 64 
 ## Development and smoke tests
 
 ```sh
-npm ci
-npm run check
+corepack enable
+pnpm install --frozen-lockfile
+pnpm check
 ```
 
-Reforge and coverage are required gates. `npm run check` also verifies formatting, lint, types, tests, source maps, build output, and package contents. Run `npm run protocol:check` whenever the installed Codex baseline changes; it compares the complete generated App Server TypeScript contract and request/notification method sets against the reviewed `0.147.0` snapshot.
+Reforge 0.2.0 and coverage are required gates. `pnpm check` also verifies formatting, lint, types, tests, source maps, build output, and package contents. Run `pnpm protocol:check` whenever the installed Codex baseline changes; it compares the complete generated App Server TypeScript contract and request/notification method sets against the reviewed `0.147.0` snapshot.
 
 The real smoke is opt-in and does not inspect credential files:
 
 ```sh
-RUN_REAL_CODEX=1 npm run test:e2e
+RUN_REAL_CODEX=1 pnpm test:e2e
 ```
 
 It uses `approvalPolicy: never`, a read-only/no-network sandbox, a temporary workspace, two context-preserving turns, and an interrupt. It self-skips when Codex is unavailable or the account is not usable.

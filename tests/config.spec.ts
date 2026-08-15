@@ -4,7 +4,7 @@ import { redactDiagnostic } from '../src/errors.js'
 
 describe('configuration and diagnostics', () => {
   it('uses conservative defaults', () => {
-    expect(resolveConfig()).toMatchObject({
+    expect(resolveConfig({}, 'linux')).toMatchObject({
       command: 'codex',
       sandboxMode: 'workspace-write',
       approvalPolicy: 'on-request',
@@ -13,6 +13,10 @@ describe('configuration and diagnostics', () => {
       unknownNotificationPolicy: 'ignore',
     })
     expect(resolveConfig()).not.toHaveProperty('networkAccess')
+  })
+
+  it('uses the npm command shim on Windows', () => {
+    expect(resolveConfig({}, 'win32').command).toBe('codex.cmd')
   })
 
   it('rejects transport and credential arguments', () => {

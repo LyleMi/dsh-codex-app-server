@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  REFORGE_VERSION: 0.2.0
+
 jobs:
   check:
     name: check (${{ matrix.os }})
@@ -18,31 +21,40 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
           node-version: 22.22.3
-          cache: npm
+          cache: pnpm
       - name: Install Reforge gate
         run: cargo install --git https://github.com/LyleMi/Reforge --rev fd5a11ce8271e70dddd4dca75d51f08d05235669 --locked reforge
-      - run: npm ci
-      - run: npm run check
+      - name: Verify Reforge version
+        shell: bash
+        run: test "$(reforge --version)" = "reforge $REFORGE_VERSION"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
 
   package-smoke:
     name: package smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
           node-version: 22.22.3
-          cache: npm
-      - run: npm ci
-      - run: npm run build
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
       - name: Install packed artifact
         shell: bash
         run: |
-          package_path=$(npm pack --silent)
+          package_stage=$(mktemp -d)
+          package_version=$(node -p "require('./package.json').version")
+          package_path="$package_stage/dsh-codex-app-server-$package_version.tgz"
+          pnpm pack --pack-destination "$package_stage"
           smoke_root=$(mktemp -d)
-          npm install --prefix "$smoke_root" "$PWD/$package_path"
+          pnpm --dir "$smoke_root" init
+          pnpm --dir "$smoke_root" add "$package_path"
           cd "$smoke_root"
           node --input-type=module -e "import('dsh-codex-app-server')"

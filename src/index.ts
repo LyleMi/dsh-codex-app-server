@@ -1,14 +1,14 @@
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { resolveConfig } from './config.js'
+import { defaultCodexCommand, resolveConfig } from './config.js'
 import type { Config } from './config.js'
 import { CodexAgentFactory } from './factory.js'
 
 export { CodexAgent } from './agent.js'
 export { ThreadBindingStore, workspaceFingerprint } from './bindings.js'
 export type { DurableThreadBinding } from './bindings.js'
-export { resolveConfig } from './config.js'
+export { defaultCodexCommand, resolveConfig } from './config.js'
 export type { Config, ResolvedConfig } from './config.js'
 export { CodexAppServerError } from './errors.js'
 export { CodexAgentFactory } from './factory.js'
@@ -26,7 +26,7 @@ export class CodexAppServerPlugin extends Service {
   static inject = ['agents', 'sessions']
 
   static Config = z.object({
-    command: z.string().default('codex'),
+    command: z.string().default(defaultCodexCommand()),
     args: z.array(z.string()).default([]),
     model: z.string(),
     reasoningEffort: z.union(['minimal', 'low', 'medium', 'high', 'xhigh'] as const),

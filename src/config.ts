@@ -46,6 +46,11 @@ export interface ResolvedConfig {
 
 const ALLOWED_ARGS = new Set(['--strict-config'])
 
+/** The npm-installed Codex shim has a .cmd suffix on Windows. */
+export function defaultCodexCommand(platform = process.platform): string {
+  return platform === 'win32' ? 'codex.cmd' : 'codex'
+}
+
 function positiveInteger(name: string, value: number | undefined, fallback: number): number {
   const resolved = value ?? fallback
   if (!Number.isSafeInteger(resolved) || resolved <= 0) {
@@ -55,8 +60,8 @@ function positiveInteger(name: string, value: number | undefined, fallback: numb
 }
 
 /** Validate configuration and reject arguments that can change transport or credentials. */
-export function resolveConfig(config: Config = {}): ResolvedConfig {
-  const command = config.command ?? 'codex'
+export function resolveConfig(config: Config = {}, platform = process.platform): ResolvedConfig {
+  const command = config.command ?? defaultCodexCommand(platform)
   if (command.trim() === '') throw new CodexAppServerError('CONFIG_INVALID', 'command must not be empty')
   const args = config.args ?? []
   for (const arg of args) {
