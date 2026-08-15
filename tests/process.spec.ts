@@ -4,7 +4,7 @@ import { buildSpawnSpec, CodexProcess } from '../src/process.js'
 
 describe('process argv', () => {
   it('uses direct POSIX argv without a shell', () => {
-    expect(buildSpawnSpec(resolveConfig(), '/workspace', 'linux')).toMatchObject({
+    expect(buildSpawnSpec(resolveConfig({}, 'linux'), '/workspace', 'linux')).toMatchObject({
       command: 'codex',
       args: ['app-server', '--stdio'],
       options: { cwd: '/workspace', detached: true },
