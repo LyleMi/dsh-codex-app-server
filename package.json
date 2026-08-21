@@ -111,7 +111,7 @@
     "@deepseek-ai/dsh-user-questions": "^0.1.0-rc.6",
     "@eslint/js": "^9.33.0",
     "@types/js-yaml": "^4.0.9",
-    "@types/node": "^22.17.1",
+    "@types/node": "^26.2.0",
     "@vitest/coverage-v8": "^3.2.4",
     "eslint": "^9.33.0",
     "js-yaml": "^4.3.1",
